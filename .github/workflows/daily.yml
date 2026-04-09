@@ -2,7 +2,7 @@ name: Daily PR Scan
 
 on:
   schedule:
-    - cron: "*/15 * * * *"
+    - cron: "*/15 * * * *"v
   workflow_dispatch:
 
 permissions:
