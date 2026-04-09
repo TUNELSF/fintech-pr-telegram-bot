@@ -4,6 +4,7 @@ import json
 import html
 import hashlib
 import requests
+import feedparser
 from bs4 import BeautifulSoup
 from datetime import datetime
 
@@ -13,292 +14,233 @@ TELEGRAM_CHAT_ID = os.environ["TELEGRAM_CHAT_ID"]
 STATE_FILE = "seen_ids.json"
 
 HEADERS = {
-    "User-Agent": "Mozilla/5.0 (compatible; FinNewsDailyBot/1.0)"
+    "User-Agent": "Mozilla/5.0 (FintechIntelBot)"
 }
 
-SOURCES = [
-    {
-        "name": "GlobeNewswire",
-        "url": "https://rss.globenewswire.com/news/banks-financial-services",
-        "base": "https://www.globenewswire.com",
-        "article_must_include": ["globenewswire.com"],
-    },
-    {
-        "name": "PR Newswire Financial Services",
-        "url": "https://www.prnewswire.com/news-releases/financial-services-latest-news/financial-services-latest-news-list/",
-        "base": "https://www.prnewswire.com",
-        "article_must_include": ["/news-releases/"],
-    },
-    {
-        "name": "PR Newswire Financial Technology",
-        "url": "https://www.prnewswire.com/news-releases/business-technology-latest-news/financial-technology-list/",
-        "base": "https://www.prnewswire.com",
-        "article_must_include": ["/news-releases/"],
-    },
+MAX_ITEMS = 20
+TELEGRAM_LIMIT = 3500
+
+# -------------------------
+# SOURCES
+# -------------------------
+
+RSS_SOURCES = [
+    ("TechCrunch Fintech", "https://techcrunch.com/tag/fintech/feed/"),
+    ("Finextra", "https://www.finextra.com/rss/headlines.aspx"),
+    ("The Paypers", "https://thepaypers.com/feed"),
+    ("CoinDesk", "https://www.coindesk.com/arc/outboundfeeds/rss/"),
+    ("Cointelegraph", "https://cointelegraph.com/rss"),
 ]
 
-SECTOR_KEYWORDS = [
-    "fintech", "financial services", "financial", "finance", "bank", "banking",
-    "payments", "payment", "lending", "loan", "loans", "credit", "debit",
-    "wealth", "asset management", "brokerage", "insurtech", "insurance",
-    "digital banking", "embedded finance", "capital markets", "treasury",
-    "merchant", "acquiring", "cards", "mortgage", "bnpl", "stablecoin",
-    "crypto", "digital asset", "exchange", "custody", "trading platform"
+HTML_SOURCES = [
+    ("GlobeNewswire", "https://rss.globenewswire.com/news/banks-financial-services", "https://www.globenewswire.com"),
+    ("PR Newswire", "https://www.prnewswire.com/news-releases/financial-services-latest-news/financial-services-latest-news-list/", "https://www.prnewswire.com"),
 ]
 
-DEVELOPMENT_KEYWORDS = [
-    "launch", "launches", "launched",
-    "introduce", "introduces", "introduced",
-    "unveil", "unveils", "unveiled",
-    "expand", "expands", "expanded", "expansion",
-    "partner", "partners", "partnership",
-    "integrate", "integrates", "integration",
-    "rollout", "rolls out",
-    "debut", "debuts",
-    "new product", "new platform", "new solution",
-    "powered by", "collaboration", "alliance"
+COMPANY_BLOGS = [
+    ("Stripe", "https://stripe.com/blog"),
+    ("Plaid", "https://plaid.com/blog/"),
+    ("PayPal", "https://newsroom.paypal-corp.com/"),
+    ("Coinbase", "https://www.coinbase.com/blog"),
+    ("Visa", "https://usa.visa.com/about-visa/newsroom.html"),
+    ("Mastercard", "https://www.mastercard.com/news/"),
+    ("Block", "https://block.xyz/newsroom"),
+    ("Robinhood", "https://blog.robinhood.com/"),
+    ("Brex", "https://www.brex.com/blog"),
+    ("Ramp", "https://ramp.com/blog"),
+    ("Mercury", "https://mercury.com/blog"),
+    ("Adyen", "https://www.adyen.com/blog"),
 ]
 
-US_HINTS = [
-    "u.s.", "united states", "us market", "american",
-    "nyse", "nasdaq", "new york", "san francisco", "chicago",
-    "miami", "dallas", "boston", "charlotte", "atlanta",
-    "los angeles", "seattle", "washington"
-]
-
-NEGATIVE_KEYWORDS = [
-    "conference call", "webcast", "earnings call", "quarterly results",
-    "annual results", "dividend", "dividends", "record date",
-    "annual meeting", "investor day", "reminder", "award", "awards",
-    "class action", "lawsuit", "investigation", "securities litigation",
-    "meme coin", "presale", "airdrop", "nft collection"
-]
-
-MAX_ITEMS = 25
-TELEGRAM_SAFE_LIMIT = 3500
-
+# -------------------------
+# UTIL
+# -------------------------
 
 def load_seen():
     try:
-        with open(STATE_FILE, "r", encoding="utf-8") as f:
+        with open(STATE_FILE, "r") as f:
             return set(json.load(f))
-    except Exception:
+    except:
         return set()
 
-
 def save_seen(seen):
-    with open(STATE_FILE, "w", encoding="utf-8") as f:
-        json.dump(sorted(list(seen)), f, indent=2)
-
+    with open(STATE_FILE, "w") as f:
+        json.dump(list(seen), f)
 
 def make_id(title, link):
-    return hashlib.md5(f"{title}|{link}".encode("utf-8")).hexdigest()
+    return hashlib.md5((title + link).encode()).hexdigest()
 
-
-def clean_text(text):
+def clean(text):
     return re.sub(r"\s+", " ", html.unescape(text or "")).strip()
 
+# -------------------------
+# FETCH FUNCTIONS
+# -------------------------
 
-def normalize_link(link, base):
-    link = (link or "").strip()
-    if not link:
-        return ""
-    if link.startswith("http://") or link.startswith("https://"):
-        return link
-    if link.startswith("/"):
-        return base.rstrip("/") + link
-    return ""
+def fetch_rss():
+    items = []
+    for name, url in RSS_SOURCES:
+        feed = feedparser.parse(url)
+        for e in feed.entries:
+            title = clean(e.get("title"))
+            link = e.get("link")
+            if title and link:
+                items.append({
+                    "title": title,
+                    "link": link,
+                    "source": name
+                })
+    return items
 
+def fetch_html_sources():
+    items = []
+    for name, url, base in HTML_SOURCES:
+        r = requests.get(url, headers=HEADERS, timeout=20)
+        soup = BeautifulSoup(r.text, "html.parser")
 
-def looks_like_article(link, must_include_parts):
-    return any(part in link for part in must_include_parts)
+        for a in soup.find_all("a", href=True):
+            title = clean(a.get_text())
+            href = a.get("href")
 
+            if len(title) < 25:
+                continue
 
-def is_hard_reject(title):
-    t = title.lower()
-    for kw in NEGATIVE_KEYWORDS:
-        if kw in t:
-            return True
-    return False
+            if href.startswith("/"):
+                link = base + href
+            elif href.startswith("http"):
+                link = href
+            else:
+                continue
 
+            items.append({
+                "title": title,
+                "link": link,
+                "source": name
+            })
 
-def score_item(title, source_name):
-    t = title.lower()
-    score = 0
+    return items
 
-    for kw in SECTOR_KEYWORDS:
-        if kw in t:
-            score += 2
+def fetch_company_blogs():
+    items = []
+    for name, url in COMPANY_BLOGS:
+        try:
+            r = requests.get(url, headers=HEADERS, timeout=20)
+            soup = BeautifulSoup(r.text, "html.parser")
 
-    for kw in DEVELOPMENT_KEYWORDS:
-        if kw in t:
-            score += 3
+            for a in soup.find_all("a", href=True):
+                title = clean(a.get_text())
+                link = a.get("href")
 
-    for kw in US_HINTS:
-        if kw in t:
-            score += 1
+                if len(title) < 25:
+                    continue
 
-    for kw in NEGATIVE_KEYWORDS:
-        if kw in t:
-            score -= 5
+                if link.startswith("/"):
+                    link = url + link
 
-    if ("launch" in t or "partner" in t or "integration" in t or "expands" in t):
-        score += 2
+                if "http" not in link:
+                    continue
 
-    if "Financial Technology" in source_name:
-        score += 0.5
+                items.append({
+                    "title": title,
+                    "link": link,
+                    "source": f"{name} Blog"
+                })
+        except:
+            continue
 
-    return score
+    return items
 
+# -------------------------
+# CATEGORY
+# -------------------------
 
 def categorize(title):
     t = title.lower()
-
-    if any(x in t for x in ["payment", "payments", "card", "merchant", "acquiring"]):
-        return "Payments"
-    if any(x in t for x in ["bank", "banking", "digital banking"]):
-        return "Banking"
-    if any(x in t for x in ["loan", "lending", "credit", "bnpl", "mortgage"]):
-        return "Lending"
-    if any(x in t for x in ["wealth", "asset management", "brokerage", "trading platform"]):
-        return "Wealth"
-    if any(x in t for x in ["crypto", "stablecoin", "digital asset", "exchange", "custody"]):
+    if "crypto" in t or "blockchain" in t:
         return "Crypto"
-    if any(x in t for x in ["insurance", "insurtech"]):
-        return "Insurance"
+    if "payment" in t or "card" in t:
+        return "Payments"
+    if "bank" in t:
+        return "Banking"
+    if "loan" in t or "lending" in t:
+        return "Lending"
+    if "wealth" in t or "asset" in t:
+        return "Wealth"
     return "General"
 
+# -------------------------
+# MAIN FETCH
+# -------------------------
 
-def scrape_source(source):
-    print(f"Fetching source: {source['name']} -> {source['url']}")
-    resp = requests.get(source["url"], headers=HEADERS, timeout=30)
-    resp.raise_for_status()
-
-    soup = BeautifulSoup(resp.text, "html.parser")
+def fetch_all():
     items = []
+    items += fetch_rss()
+    items += fetch_html_sources()
+    items += fetch_company_blogs()
 
-    for a in soup.find_all("a", href=True):
-        title = clean_text(a.get_text(" ", strip=True))
-        link = normalize_link(a.get("href", ""), source["base"])
+    dedup = {}
+    for i in items:
+        id_ = make_id(i["title"], i["link"])
+        dedup[id_] = i
 
-        if not title or not link:
-            continue
-        if len(title) < 25:
-            continue
-        if not looks_like_article(link, source["article_must_include"]):
-            continue
-        if is_hard_reject(title):
-            continue
+    print(f"Total items collected: {len(dedup)}")
+    return list(dedup.values())
 
-        item = {
-            "source": source["name"],
-            "title": title,
-            "link": link,
-        }
-        item["id"] = make_id(item["title"], item["link"])
-        item["score"] = score_item(item["title"], item["source"])
-        item["category"] = categorize(item["title"])
-        items.append(item)
-
-    deduped = []
-    seen_local = set()
-    for item in items:
-        if item["id"] in seen_local:
-            continue
-        seen_local.add(item["id"])
-        deduped.append(item)
-
-    print(f"{source['name']} scraped: {len(deduped)}")
-    return deduped
-
-
-def fetch_items():
-    all_items = []
-    for source in SOURCES:
-        try:
-            all_items.extend(scrape_source(source))
-        except Exception as e:
-            print(f"Error scraping {source['name']}: {e}")
-
-    deduped = []
-    seen_global = set()
-    for item in all_items:
-        if item["id"] in seen_global:
-            continue
-        seen_global.add(item["id"])
-        deduped.append(item)
-
-    kept = [item for item in deduped if item["score"] >= 3]
-    kept.sort(key=lambda x: x["score"], reverse=True)
-
-    print(f"Total deduped items: {len(deduped)}")
-    print(f"Filtered items kept: {len(kept)}")
-    return kept[:25]
-
+# -------------------------
+# FORMAT
+# -------------------------
 
 def format_messages(items):
     today = datetime.now().strftime("%b %d, %Y")
+    header = f"Daily Fintech Intelligence — {today}\n\n"
 
-    if not items:
-        return [f"Daily Fintech / Financial Services Product Scan — {today}\n\nNo new announcements found."]
-
-    selected_items = items[:MAX_ITEMS]
-    header = f"Daily Fintech / Financial Services Product Scan — {today}\n\n"
-
-    chunks = []
+    messages = []
     current = header
 
-    for i, item in enumerate(selected_items, 1):
-        block = (
-            f"{i}) [{item['category']}] {item['title']}\n"
-            f"Source: {item['source']}\n"
-            f"{item['link']}\n\n"
-        )
+    for i, item in enumerate(items[:MAX_ITEMS], 1):
+        block = f"{i}) [{categorize(item['title'])}] {item['title']}\nSource: {item['source']}\n{item['link']}\n\n"
 
-        if len(current) + len(block) > TELEGRAM_SAFE_LIMIT:
-            chunks.append(current.strip())
+        if len(current) + len(block) > TELEGRAM_LIMIT:
+            messages.append(current)
             current = header + block
         else:
             current += block
 
-    if current.strip():
-        chunks.append(current.strip())
-
-    return chunks
-
+    messages.append(current)
+    return messages
 
 def send(messages):
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
 
     for msg in messages:
-        response = requests.post(
-            url,
-            json={
-                "chat_id": TELEGRAM_CHAT_ID,
-                "text": msg,
-                "disable_web_page_preview": True
-            },
-            timeout=30
-        )
-        print(response.text)
-        response.raise_for_status()
+        r = requests.post(url, json={
+            "chat_id": TELEGRAM_CHAT_ID,
+            "text": msg,
+            "disable_web_page_preview": True
+        })
+        r.raise_for_status()
 
+# -------------------------
+# MAIN
+# -------------------------
 
 def main():
     seen = load_seen()
-    items = fetch_items()
-    new_items = [item for item in items if item["id"] not in seen][:MAX_ITEMS]
+    items = fetch_all()
 
-    print(f"New unseen items: {len(new_items)}")
+    new_items = []
+    for item in items:
+        id_ = make_id(item["title"], item["link"])
+        if id_ not in seen:
+            new_items.append(item)
+            seen.add(id_)
+
+    print(f"New items: {len(new_items)}")
 
     messages = format_messages(new_items)
     send(messages)
 
-    for item in new_items:
-        seen.add(item["id"])
-
     save_seen(seen)
-
 
 if __name__ == "__main__":
     main()
