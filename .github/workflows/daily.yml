@@ -1,4 +1,4 @@
-name: Daily PR Scan
+name: Daily PR Scan v2
 
 on:
   schedule:
