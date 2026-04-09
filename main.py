@@ -74,7 +74,7 @@ NEGATIVE_KEYWORDS = [
     "meme coin", "presale", "airdrop", "nft collection"
 ]
 
-MAX_ITEMS = 8
+MAX_ITEMS = 25
 TELEGRAM_SAFE_LIMIT = 3500
 
 
