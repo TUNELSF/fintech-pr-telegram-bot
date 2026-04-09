@@ -12,51 +12,73 @@ TELEGRAM_CHAT_ID = os.environ["TELEGRAM_CHAT_ID"]
 
 STATE_FILE = "seen_ids.json"
 
-SOURCES = [
-    {
-        "name": "GlobeNewswire",
-        "type": "html",
-        "url": "https://rss.globenewswire.com/news/banks-financial-services",
-    },
-    {
-        "name": "PR Newswire",
-        "type": "html",
-        "url": "https://www.prnewswire.com/news-releases/financial-services-latest-news/financial-services-latest-news-list/",
-    },
-]
-
 HEADERS = {
     "User-Agent": "Mozilla/5.0 (compatible; FinNewsDailyBot/1.0)"
 }
 
-POSITIVE_KEYWORDS = [
-    "bank", "banking", "financial", "finance", "fintech", "payments",
-    "lending", "credit", "debit", "wealth", "asset management",
-    "brokerage", "insurtech", "digital banking", "embedded finance",
-    "capital markets", "treasury", "merchant", "acquiring",
-    "card", "cards", "mortgage", "loan", "loans", "insurance",
-    "investment bank", "investment banking", "private equity",
-    "asset servicing", "custody", "risk management"
+SOURCES = [
+    {
+        "name": "GlobeNewswire",
+        "url": "https://rss.globenewswire.com/news/banks-financial-services",
+        "base": "https://www.globenewswire.com",
+        "article_must_include": ["globenewswire.com"],
+    },
+    {
+        "name": "PR Newswire Financial Services",
+        "url": "https://www.prnewswire.com/news-releases/financial-services-latest-news/financial-services-latest-news-list/",
+        "base": "https://www.prnewswire.com",
+        "article_must_include": ["/news-releases/"],
+    },
+    {
+        "name": "PR Newswire Financial Technology",
+        "url": "https://www.prnewswire.com/news-releases/business-technology-latest-news/financial-technology-list/",
+        "base": "https://www.prnewswire.com",
+        "article_must_include": ["/news-releases/"],
+    },
 ]
 
-NEGATIVE_KEYWORDS = [
-    "webcast", "conference call", "conference-call", "investor call",
-    "earnings call", "quarterly results", "annual results", "dividend",
-    "dividends", "distribution declaration", "record date", "ex-dividend",
-    "net asset value", "nav per share", "conference", "summit",
-    "forum", "expo", "award", "awards", "final deadline", "reminder",
-    "class action", "lawsuit", "securities litigation", "investigation",
-    "shareholder alert", "crypto", "token", "presale", "meme coin",
-    "coin", "blockchain gaming", "nft"
+# Signals we WANT
+SECTOR_KEYWORDS = [
+    "fintech", "financial services", "financial", "finance", "bank", "banking",
+    "payments", "payment", "lending", "loan", "loans", "credit", "debit",
+    "wealth", "asset management", "brokerage", "insurtech", "insurance",
+    "digital banking", "embedded finance", "capital markets", "treasury",
+    "merchant", "acquiring", "cards", "mortgage", "bnpl", "stablecoin",
+    "crypto", "digital asset", "exchange", "custody", "trading platform"
 ]
 
+# Product / development verbs we WANT
+DEVELOPMENT_KEYWORDS = [
+    "launch", "launches", "launched",
+    "introduce", "introduces", "introduced",
+    "unveil", "unveils", "unveiled",
+    "expand", "expands", "expanded", "expansion",
+    "partner", "partners", "partnership",
+    "integrate", "integrates", "integration",
+    "rollout", "rolls out",
+    "debut", "debuts",
+    "new product", "new platform", "new solution",
+    "powered by", "collaboration", "alliance"
+]
+
+# US relevance hints
 US_HINTS = [
-    "u.s.", "united states", "america", "american", "nyse", "nasdaq",
-    "new york", "san francisco", "chicago", "miami", "dallas", "boston",
-    "atlanta", "charlotte", "washington", "los angeles", "seattle"
+    "u.s.", "united states", "us market", "american",
+    "nyse", "nasdaq", "new york", "san francisco", "chicago",
+    "miami", "dallas", "boston", "charlotte", "atlanta",
+    "los angeles", "seattle", "washington"
 ]
 
-MAX_ITEMS = 10
+# Things we mostly do NOT want
+NEGATIVE_KEYWORDS = [
+    "conference call", "webcast", "earnings call", "quarterly results",
+    "annual results", "dividend", "dividends", "record date",
+    "annual meeting", "investor day", "reminder", "award", "awards",
+    "class action", "lawsuit", "investigation", "securities litigation",
+    "meme coin", "presale", "airdrop", "nft collection"
+]
+
+MAX_ITEMS = 12
 
 
 def load_seen():
@@ -80,51 +102,6 @@ def clean_text(text):
     return re.sub(r"\s+", " ", html.unescape(text or "")).strip()
 
 
-def score_item(title, source_name):
-    t = title.lower()
-    score = 0
-
-    for kw in POSITIVE_KEYWORDS:
-        if kw in t:
-            score += 2
-
-    for kw in US_HINTS:
-        if kw in t:
-            score += 1
-
-    for kw in NEGATIVE_KEYWORDS:
-        if kw in t:
-            score -= 4
-
-    if "announces" in t or "launches" in t or "expands" in t or "partners" in t:
-        score += 1
-
-    if source_name == "PR Newswire":
-        score += 0.2
-
-    return score
-
-
-def is_junk(title):
-    t = title.lower()
-
-    hard_reject_patterns = [
-        r"\bcrypto\b",
-        r"\btoken\b",
-        r"\bmeme coin\b",
-        r"\bnft\b",
-        r"\bconference call\b",
-        r"\bwebcast\b",
-        r"\bdividend\b",
-        r"\bclass action\b",
-        r"\blawsuit\b",
-        r"\binvestigation\b",
-        r"\baward\b",
-    ]
-
-    return any(re.search(pattern, t) for pattern in hard_reject_patterns)
-
-
 def normalize_link(link, base):
     link = (link or "").strip()
     if not link:
@@ -136,9 +113,70 @@ def normalize_link(link, base):
     return ""
 
 
-def scrape_globenewswire():
-    url = "https://rss.globenewswire.com/news/banks-financial-services"
-    resp = requests.get(url, headers=HEADERS, timeout=30)
+def looks_like_article(link, must_include_parts):
+    return any(part in link for part in must_include_parts)
+
+
+def is_hard_reject(title):
+    t = title.lower()
+    for kw in NEGATIVE_KEYWORDS:
+        if kw in t:
+            return True
+    return False
+
+
+def score_item(title, source_name):
+    t = title.lower()
+    score = 0
+
+    for kw in SECTOR_KEYWORDS:
+        if kw in t:
+            score += 2
+
+    for kw in DEVELOPMENT_KEYWORDS:
+        if kw in t:
+            score += 3
+
+    for kw in US_HINTS:
+        if kw in t:
+            score += 1
+
+    for kw in NEGATIVE_KEYWORDS:
+        if kw in t:
+            score -= 5
+
+    # Prefer actual development-type announcements
+    if ("launch" in t or "partner" in t or "integration" in t or "expands" in t):
+        score += 2
+
+    # Light preference for PR Newswire product-tech page
+    if "Financial Technology" in source_name:
+        score += 0.5
+
+    return score
+
+
+def categorize(title):
+    t = title.lower()
+
+    if any(x in t for x in ["payment", "payments", "card", "merchant", "acquiring"]):
+        return "Payments"
+    if any(x in t for x in ["bank", "banking", "digital banking"]):
+        return "Banking"
+    if any(x in t for x in ["loan", "lending", "credit", "bnpl", "mortgage"]):
+        return "Lending"
+    if any(x in t for x in ["wealth", "asset management", "brokerage", "trading platform"]):
+        return "Wealth"
+    if any(x in t for x in ["crypto", "stablecoin", "digital asset", "exchange", "custody"]):
+        return "Crypto"
+    if any(x in t for x in ["insurance", "insurtech"]):
+        return "Insurance"
+    return "General"
+
+
+def scrape_source(source):
+    print(f"Fetching source: {source['name']} -> {source['url']}")
+    resp = requests.get(source["url"], headers=HEADERS, timeout=30)
     resp.raise_for_status()
 
     soup = BeautifulSoup(resp.text, "html.parser")
@@ -146,108 +184,76 @@ def scrape_globenewswire():
 
     for a in soup.find_all("a", href=True):
         title = clean_text(a.get_text(" ", strip=True))
-        link = normalize_link(a["href"], "https://www.globenewswire.com")
+        link = normalize_link(a.get("href", ""), source["base"])
 
         if not title or not link:
             continue
         if len(title) < 25:
             continue
-        if "globenewswire" not in link:
+        if not looks_like_article(link, source["article_must_include"]):
             continue
-        if is_junk(title):
+        if is_hard_reject(title):
             continue
 
-        items.append({
-            "source": "GlobeNewswire",
+        item = {
+            "source": source["name"],
             "title": title,
             "link": link,
-        })
+        }
+        item["id"] = make_id(item["title"], item["link"])
+        item["score"] = score_item(item["title"], item["source"])
+        item["category"] = categorize(item["title"])
+        items.append(item)
 
-    return dedupe_items(items)
-
-
-def scrape_prnewswire():
-    url = "https://www.prnewswire.com/news-releases/financial-services-latest-news/financial-services-latest-news-list/"
-    resp = requests.get(url, headers=HEADERS, timeout=30)
-    resp.raise_for_status()
-
-    soup = BeautifulSoup(resp.text, "html.parser")
-    items = []
-
-    for a in soup.find_all("a", href=True):
-        title = clean_text(a.get_text(" ", strip=True))
-        href = a.get("href", "")
-        link = normalize_link(href, "https://www.prnewswire.com")
-
-        if not title or not link:
-            continue
-        if len(title) < 25:
-            continue
-        if "/news-releases/" not in link:
-            continue
-        if is_junk(title):
-            continue
-
-        items.append({
-            "source": "PR Newswire",
-            "title": title,
-            "link": link,
-        })
-
-    return dedupe_items(items)
-
-
-def dedupe_items(items):
-    seen = set()
+    # Deduplicate per source
     deduped = []
-
+    seen_local = set()
     for item in items:
-        iid = make_id(item["title"], item["link"])
-        if iid in seen:
+        if item["id"] in seen_local:
             continue
-        item["id"] = iid
-        seen.add(iid)
+        seen_local.add(item["id"])
         deduped.append(item)
 
+    print(f"{source['name']} scraped: {len(deduped)}")
     return deduped
 
 
 def fetch_items():
     all_items = []
+    for source in SOURCES:
+        try:
+            all_items.extend(scrape_source(source))
+        except Exception as e:
+            print(f"Error scraping {source['name']}: {e}")
 
-    globe_items = scrape_globenewswire()
-    prn_items = scrape_prnewswire()
-
-    print(f"GlobeNewswire items scraped: {len(globe_items)}")
-    print(f"PR Newswire items scraped: {len(prn_items)}")
-
-    all_items.extend(globe_items)
-    all_items.extend(prn_items)
-
-    all_items = dedupe_items(all_items)
-
-    scored = []
+    # Global dedupe
+    deduped = []
+    seen_global = set()
     for item in all_items:
-        item["score"] = score_item(item["title"], item["source"])
-        if item["score"] >= 1:
-            scored.append(item)
+        if item["id"] in seen_global:
+            continue
+        seen_global.add(item["id"])
+        deduped.append(item)
 
-    scored.sort(key=lambda x: x["score"], reverse=True)
+    # Keep higher-signal items
+    kept = [item for item in deduped if item["score"] >= 3]
+    kept.sort(key=lambda x: x["score"], reverse=True)
 
-    print(f"Filtered items kept: {len(scored)}")
-    return scored[:20]
+    print(f"Total deduped items: {len(deduped)}")
+    print(f"Filtered items kept: {len(kept)}")
+    return kept[:25]
 
 
 def format_message(items):
     today = datetime.now().strftime("%b %d, %Y")
 
     if not items:
-        return f"Daily Fintech PR Scan — {today}\n\nNo new announcements found."
+        return f"Daily Fintech / Financial Services Product Scan — {today}\n\nNo new announcements found."
 
-    lines = [f"Daily Fintech PR Scan — {today}", ""]
+    lines = [f"Daily Fintech / Financial Services Product Scan — {today}", ""]
 
     for i, item in enumerate(items[:MAX_ITEMS], 1):
-        lines.append(f"{i}) {item['title']}")
+        lines.append(f"{i}) [{item['category']}] {item['title']}")
         lines.append(f"Source: {item['source']}")
         lines.append(item["link"])
         lines.append("")
