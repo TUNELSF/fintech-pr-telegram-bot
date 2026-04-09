@@ -69,7 +69,7 @@ def fetch_items():
         feed = feedparser.parse(url)
         for e in feed.entries:
             text = (e.get("title","") + e.get("summary","")).lower()
-            if is_recent(e) and is_relevant(text):
+            if is_recent(e) :
                 items.append({
                     "id": item_id(e),
                     "title": html.unescape(e.title),
