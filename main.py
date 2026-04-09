@@ -50,7 +50,18 @@ def is_recent(entry):
 
 def is_relevant(text):
     text = text.lower()
-    return any(k in text for k in KEYWORDS)
+
+    score = 0
+
+    for k in KEYWORDS:
+        if k in text:
+            score += 1
+
+    # broader financial catch
+    if "financial" in text or "finance" in text:
+        score += 1
+
+    return score >= 1
 
 def fetch_items():
     items = []
