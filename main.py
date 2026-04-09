@@ -3,18 +3,15 @@ import json
 import html
 import hashlib
 import requests
-import feedparser
-from datetime import datetime, timezone, timedelta
-from email.utils import parsedate_to_datetime
+from bs4 import BeautifulSoup
+from datetime import datetime, timezone
 
 TELEGRAM_BOT_TOKEN = os.environ["TELEGRAM_BOT_TOKEN"]
 TELEGRAM_CHAT_ID = os.environ["TELEGRAM_CHAT_ID"]
 
 STATE_FILE = "seen_ids.json"
 
-FEEDS = [
-    "https://rss.globenewswire.com/news/banks-financial-services",
-]
+SOURCE_URL = "https://rss.globenewswire.com/news/banks-financial-services"
 
 HEADERS = {
     "User-Agent": "Mozilla/5.0 (compatible; FinNewsDailyBot/1.0)"
@@ -31,71 +28,68 @@ def save_seen(seen):
     with open(STATE_FILE, "w", encoding="utf-8") as f:
         json.dump(sorted(list(seen)), f)
 
-def item_id(entry):
-    base = entry.get("id") or entry.get("link") or entry.get("title", "")
-    return hashlib.md5(base.encode("utf-8")).hexdigest()
-
-def parse_date(entry):
-    for field in ["published", "updated"]:
-        value = entry.get(field)
-        if value:
-            try:
-                dt = parsedate_to_datetime(value)
-                if dt.tzinfo is None:
-                    dt = dt.replace(tzinfo=timezone.utc)
-                return dt.astimezone(timezone.utc)
-            except Exception:
-                pass
-    return datetime.now(timezone.utc)
-
-def is_recent(entry, hours=72):
-    dt = parse_date(entry)
-    return dt >= datetime.now(timezone.utc) - timedelta(hours=hours)
-
-def fetch_feed(url):
-    resp = requests.get(url, headers=HEADERS, timeout=30)
-    resp.raise_for_status()
-    feed = feedparser.parse(resp.content)
-    return feed
+def item_id(title, link):
+    return hashlib.md5(f"{title}|{link}".encode("utf-8")).hexdigest()
 
 def fetch_items():
+    print(f"Fetching page: {SOURCE_URL}")
+    resp = requests.get(SOURCE_URL, headers=HEADERS, timeout=30)
+    resp.raise_for_status()
+
+    soup = BeautifulSoup(resp.text, "html.parser")
     items = []
 
-    for url in FEEDS:
-        print(f"Fetching feed: {url}")
-        feed = fetch_feed(url)
-        print(f"Feed entries found: {len(feed.entries)}")
+    # GlobeNewswire article links on this page are the headline anchors in the main list.
+    for a in soup.find_all("a", href=True):
+        title = html.unescape(a.get_text(" ", strip=True))
+        href = a["href"].strip()
 
-        for e in feed.entries:
-            title = html.unescape(e.get("title", "")).strip()
-            link = e.get("link", "").strip()
-            summary = html.unescape(e.get("summary", "")).strip()
+        if not title:
+            continue
 
-            if not title or not link:
-                continue
+        if href.startswith("/"):
+            link = "https://www.globenewswire.com" + href
+        elif href.startswith("http"):
+            link = href
+        else:
+            continue
 
-            if is_recent(e):
-                items.append({
-                    "id": item_id(e),
-                    "title": title,
-                    "link": link,
-                    "summary": summary,
-                    "date": parse_date(e),
-                })
+        # Skip nav/UI links and keep likely article links
+        if len(title) < 25:
+            continue
+        if "news" in title.lower() and title.lower().endswith("news"):
+            continue
+        if "Read News" in title or "View All" in title or "Next Page" in title:
+            continue
 
-    print(f"Recent items collected: {len(items)}")
-    return items
+        items.append({
+            "id": item_id(title, link),
+            "title": title,
+            "link": link
+        })
+
+    # de-duplicate while preserving order
+    deduped = []
+    seen_local = set()
+    for item in items:
+        if item["id"] not in seen_local:
+            deduped.append(item)
+            seen_local.add(item["id"])
+
+    print(f"Items scraped: {len(deduped)}")
+    return deduped[:15]
 
 def format_message(items):
     today = datetime.now().strftime("%b %d, %Y")
-
     if not items:
-        return f"Daily Fintech PR Scan — {today}\n\nNo new relevant announcements found."
+        return f"Daily Fintech PR Scan — {today}\n\nNo new announcements found."
 
-    msg = f"Daily Fintech PR Scan — {today}\n\n"
+    lines = [f"Daily Fintech PR Scan — {today}", ""]
     for i, item in enumerate(items[:10], 1):
-        msg += f"{i}) {item['title']}\n{item['link']}\n\n"
-    return msg.strip()
+        lines.append(f"{i}) {item['title']}")
+        lines.append(item["link"])
+        lines.append("")
+    return "\n".join(lines).strip()
 
 def send(msg):
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
@@ -113,16 +107,13 @@ def send(msg):
 def main():
     seen = load_seen()
     items = fetch_items()
-
     new_items = [i for i in items if i["id"] not in seen]
     print(f"New unseen items: {len(new_items)}")
 
-    msg = format_message(new_items)
-    send(msg)
+    send(format_message(new_items))
 
-    for i in new_items:
-        seen.add(i["id"])
-
+    for item in new_items:
+        seen.add(item["id"])
     save_seen(seen)
 
 if __name__ == "__main__":
