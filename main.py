@@ -37,7 +37,6 @@ SOURCES = [
     },
 ]
 
-# Signals we WANT
 SECTOR_KEYWORDS = [
     "fintech", "financial services", "financial", "finance", "bank", "banking",
     "payments", "payment", "lending", "loan", "loans", "credit", "debit",
@@ -47,7 +46,6 @@ SECTOR_KEYWORDS = [
     "crypto", "digital asset", "exchange", "custody", "trading platform"
 ]
 
-# Product / development verbs we WANT
 DEVELOPMENT_KEYWORDS = [
     "launch", "launches", "launched",
     "introduce", "introduces", "introduced",
@@ -61,7 +59,6 @@ DEVELOPMENT_KEYWORDS = [
     "powered by", "collaboration", "alliance"
 ]
 
-# US relevance hints
 US_HINTS = [
     "u.s.", "united states", "us market", "american",
     "nyse", "nasdaq", "new york", "san francisco", "chicago",
@@ -69,7 +66,6 @@ US_HINTS = [
     "los angeles", "seattle", "washington"
 ]
 
-# Things we mostly do NOT want
 NEGATIVE_KEYWORDS = [
     "conference call", "webcast", "earnings call", "quarterly results",
     "annual results", "dividend", "dividends", "record date",
@@ -78,7 +74,8 @@ NEGATIVE_KEYWORDS = [
     "meme coin", "presale", "airdrop", "nft collection"
 ]
 
-MAX_ITEMS = 12
+MAX_ITEMS = 8
+TELEGRAM_SAFE_LIMIT = 3500
 
 
 def load_seen():
@@ -145,11 +142,9 @@ def score_item(title, source_name):
         if kw in t:
             score -= 5
 
-    # Prefer actual development-type announcements
     if ("launch" in t or "partner" in t or "integration" in t or "expands" in t):
         score += 2
 
-    # Light preference for PR Newswire product-tech page
     if "Financial Technology" in source_name:
         score += 0.5
 
@@ -205,7 +200,6 @@ def scrape_source(source):
         item["category"] = categorize(item["title"])
         items.append(item)
 
-    # Deduplicate per source
     deduped = []
     seen_local = set()
     for item in items:
@@ -226,7 +220,6 @@ def fetch_items():
         except Exception as e:
             print(f"Error scraping {source['name']}: {e}")
 
-    # Global dedupe
     deduped = []
     seen_global = set()
     for item in all_items:
@@ -235,7 +228,6 @@ def fetch_items():
         seen_global.add(item["id"])
         deduped.append(item)
 
-    # Keep higher-signal items
     kept = [item for item in deduped if item["score"] >= 3]
     kept.sort(key=lambda x: x["score"], reverse=True)
 
@@ -244,45 +236,63 @@ def fetch_items():
     return kept[:25]
 
 
-def format_message(items):
+def format_messages(items):
     today = datetime.now().strftime("%b %d, %Y")
 
     if not items:
-        return f"Daily Fintech / Financial Services Product Scan — {today}\n\nNo new announcements found."
+        return [f"Daily Fintech / Financial Services Product Scan — {today}\n\nNo new announcements found."]
 
-    lines = [f"Daily Fintech / Financial Services Product Scan — {today}", ""]
+    selected_items = items[:MAX_ITEMS]
+    header = f"Daily Fintech / Financial Services Product Scan — {today}\n\n"
 
-    for i, item in enumerate(items[:MAX_ITEMS], 1):
-        lines.append(f"{i}) [{item['category']}] {item['title']}")
-        lines.append(f"Source: {item['source']}")
-        lines.append(item["link"])
-        lines.append("")
+    chunks = []
+    current = header
 
-    return "\n".join(lines).strip()
+    for i, item in enumerate(selected_items, 1):
+        block = (
+            f"{i}) [{item['category']}] {item['title']}\n"
+            f"Source: {item['source']}\n"
+            f"{item['link']}\n\n"
+        )
+
+        if len(current) + len(block) > TELEGRAM_SAFE_LIMIT:
+            chunks.append(current.strip())
+            current = header + block
+        else:
+            current += block
+
+    if current.strip():
+        chunks.append(current.strip())
+
+    return chunks
 
 
-def send(msg):
+def send(messages):
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
-    response = requests.post(
-        url,
-        json={
-            "chat_id": TELEGRAM_CHAT_ID,
-            "text": msg,
-            "disable_web_page_preview": True
-        },
-        timeout=30
-    )
-    response.raise_for_status()
+
+    for msg in messages:
+        response = requests.post(
+            url,
+            json={
+                "chat_id": TELEGRAM_CHAT_ID,
+                "text": msg,
+                "disable_web_page_preview": True
+            },
+            timeout=30
+        )
+        print(response.text)
+        response.raise_for_status()
 
 
 def main():
     seen = load_seen()
     items = fetch_items()
-    new_items = [item for item in items if item["id"] not in seen]
+    new_items = [item for item in items if item["id"] not in seen][:MAX_ITEMS]
 
     print(f"New unseen items: {len(new_items)}")
 
-    send(format_message(new_items))
+    messages = format_messages(new_items)
+    send(messages)
 
     for item in new_items:
         seen.add(item["id"])
