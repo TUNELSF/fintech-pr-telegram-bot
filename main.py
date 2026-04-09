@@ -17,7 +17,7 @@ HEADERS = {
     "User-Agent": "Mozilla/5.0 (FintechIntelBot)"
 }
 
-MAX_ITEMS = 20
+MAX_ITEMS = 50
 TELEGRAM_LIMIT = 3500
 
 # -------------------------
