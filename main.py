@@ -3,13 +3,14 @@ import re
 import json
 import html
 import hashlib
+import traceback
 import requests
 import feedparser
 from bs4 import BeautifulSoup
 from datetime import datetime
 
-TELEGRAM_BOT_TOKEN = os.environ["TELEGRAM_BOT_TOKEN"]
-TELEGRAM_CHAT_ID = os.environ["TELEGRAM_CHAT_ID"]
+TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
+TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 
 STATE_FILE = "seen_ids.json"
 
@@ -319,6 +320,9 @@ def format_messages(items):
     return messages
 
 def send(messages):
+    if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
+        raise RuntimeError("Missing TELEGRAM_BOT_TOKEN or TELEGRAM_CHAT_ID environment variables.")
+
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
 
     for msg in messages:
@@ -326,7 +330,11 @@ def send(messages):
             "chat_id": TELEGRAM_CHAT_ID,
             "text": msg,
             "disable_web_page_preview": True
-        })
+        }, timeout=20)
+
+        if r.status_code != 200:
+            raise RuntimeError(f"Telegram API error {r.status_code}: {r.text}")
+
         r.raise_for_status()
 
 # -------------------------
@@ -334,22 +342,31 @@ def send(messages):
 # -------------------------
 
 def main():
-    seen = load_seen()
-    items = fetch_all()
+    try:
+        seen = load_seen()
+        items = fetch_all()
 
-    new_items = []
-    for item in items:
-        id_ = make_id(item["title"], item["link"])
-        if id_ not in seen:
-            new_items.append(item)
-            seen.add(id_)
+        new_items = []
+        for item in items:
+            id_ = make_id(item["title"], item["link"])
+            if id_ not in seen:
+                new_items.append(item)
+                seen.add(id_)
 
-    print(f"New items: {len(new_items)}")
+        print(f"New items: {len(new_items)}")
 
-    messages = format_messages(new_items)
-    send(messages)
+        if not new_items:
+            today = datetime.now().strftime("%b %d, %Y")
+            send([f"Daily Fintech Intelligence — {today}\n\nNo new items found today."])
+            return
 
-    save_seen(seen)
+        messages = format_messages(new_items)
+        send(messages)
+        save_seen(seen)
+    except Exception as e:
+        print(f"Fatal error: {e}")
+        traceback.print_exc()
+        raise
 
 if __name__ == "__main__":
     main()
