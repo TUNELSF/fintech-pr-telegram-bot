@@ -20,7 +20,9 @@ HEADERS = {
 }
 
 TOP_N = 100
-TELEGRAM_LIMIT = 3500
+TELEGRAM_LIMIT = 3000
+REQUEST_TIMEOUT = 10
+BLOG_SLEEP_SECONDS = 0.2
 
 # -------------------------
 # RSS SOURCES
@@ -197,6 +199,7 @@ COMPANY_BLOGS = [
 SOURCE_QUALITY = {
     "globenewswire": 5,
     "pr newswire": 5,
+    "blog": 5,
 
     "techcrunch fintech": 4,
     "finextra": 4,
@@ -214,9 +217,31 @@ SOURCE_QUALITY = {
     "etf stream": 3,
     "finovate": 3,
     "ibs intelligence": 3,
-
-    "blog": 5,
 }
+
+EVENT_RULES = [
+    ("🧠 Agentic / AI", [
+        "agentic", "ai agent", "ai agents", "copilot", "assistant",
+        "autonomous", "agent-based", "ai advisor", "ai treasury",
+        "ai invoice", "ai underwriting"
+    ]),
+    ("🚀 Product Launch", [
+        "launch", "launches", "launched", "introduce", "introduces",
+        "introduced", "unveil", "unveils", "unveiled", "debut", "debuts"
+    ]),
+    ("🤝 Partnership", [
+        "partnership", "partners", "partner", "collaboration", "alliance"
+    ]),
+    ("🔌 Integration", [
+        "integration", "integrates", "integrated", "embedded", "api"
+    ]),
+    ("🏦 Fund / ETF / Index", [
+        "etf", "fund", "index", "benchmark", "portfolio", "strategy"
+    ]),
+    ("📄 Research / Whitepaper", [
+        "whitepaper", "research", "report", "webinar", "study"
+    ]),
+]
 
 STRONG_POSITIVE_KEYWORDS = [
     "launch", "launches", "launched",
@@ -229,7 +254,8 @@ STRONG_POSITIVE_KEYWORDS = [
     "rollout", "roll out",
     "new product", "new platform", "new solution",
     "whitepaper", "research", "webinar",
-    "api", "platform", "solution", "index", "etf", "fund"
+    "api", "platform", "solution", "index", "etf", "fund",
+    "tokenization", "stablecoin", "custody", "wallet"
 ]
 
 WEAK_NEGATIVE_KEYWORDS = [
@@ -292,6 +318,13 @@ def clean(text):
     return re.sub(r"\s+", " ", html.unescape(text or "")).strip()
 
 
+def truncate_text(text, max_len):
+    text = clean(text)
+    if len(text) <= max_len:
+        return text
+    return text[: max_len - 1].rstrip() + "…"
+
+
 def normalize_link(base_url, href):
     if not href:
         return ""
@@ -319,11 +352,9 @@ def source_priority(source_name):
 
 def infer_source_quality(source_name):
     s = source_name.lower()
-
     for key, score in SOURCE_QUALITY.items():
         if key in s:
             return score
-
     return 2
 
 
@@ -337,6 +368,16 @@ def categorize(title, source=""):
         return "Crypto"
 
     return "Traditional Finance"
+
+
+def detect_event_type(title, source=""):
+    t = (title + " " + source).lower()
+
+    for label, keywords in EVENT_RULES:
+        if any(k in t for k in keywords):
+            return label
+
+    return "📌 Notable Development"
 
 
 def is_productish(title):
@@ -358,32 +399,39 @@ def quality_score(title, source=""):
     t = (title + " " + source).lower()
     score = 0
 
-    # 1. Source quality (0-5)
+    # Source quality (0-5)
     score += infer_source_quality(source)
 
-    # 2. Product-development intent (0-5)
+    # Product / launch intent (0-6)
     intent_hits = sum(1 for kw in STRONG_POSITIVE_KEYWORDS if kw in t)
-    score += min(intent_hits, 5)
+    score += min(intent_hits, 6)
 
-    # 3. Specificity / named product-like signals (0-3)
+    # Specificity (0-3)
     specificity_hits = sum(1 for kw in SPECIFICITY_KEYWORDS if kw in t)
     score += min(specificity_hits, 3)
 
-    # 4. U.S. relevance (0-2)
+    # U.S. relevance (0-2)
     us_hits = sum(1 for kw in US_RELEVANCE_KEYWORDS if kw in t)
     score += min(us_hits, 2)
 
-    # 5. Category relevance bonus (0-2)
-    if categorize(title, source) == "Agentic Finance":
+    # Category bonus
+    cat = categorize(title, source)
+    if cat == "Agentic Finance":
         score += 2
-    elif categorize(title, source) == "Crypto":
+    elif cat == "Crypto":
         score += 1
 
-    # Negative adjustments
+    # Strong bonus for explicit launch/partnership/integration
+    if any(x in t for x in ["launch", "launched", "launches", "introduce", "unveil", "debut"]):
+        score += 2
+    if any(x in t for x in ["partnership", "partners", "integration", "integrates"]):
+        score += 2
+
+    # Penalty for weak/noisy items
     if any(x in t for x in WEAK_NEGATIVE_KEYWORDS):
         score -= 3
 
-    # Reward title richness
+    # Slight reward for richer titles
     if len(title) > 60:
         score += 1
 
@@ -391,32 +439,32 @@ def quality_score(title, source=""):
 
 
 def generate_summary(title, source=""):
-    t = (title + " " + source).lower()
-
-    if "partnership" in t or "partners" in t or "partner" in t:
-        action = "New partnership or go-to-market collaboration."
-    elif "launch" in t or "introduce" in t or "unveil" in t or "debut" in t:
-        action = "New product or platform launch."
-    elif "integration" in t:
-        action = "New product integration or workflow expansion."
-    elif "whitepaper" in t or "research" in t or "report" in t:
-        action = "New research or product-related market analysis."
-    elif "webinar" in t:
-        action = "Webinar tied to new capabilities or product strategy."
-    elif "index" in t or "etf" in t or "fund" in t:
-        action = "New investment product, index, or fund-related announcement."
-    else:
-        action = "New development relevant to the sector."
-
+    event = detect_event_type(title, source)
     category = categorize(title, source)
-    if category == "Agentic Finance":
-        prefix = "Agentic-finance signal."
-    elif category == "Crypto":
-        prefix = "Crypto / digital-asset signal."
-    else:
-        prefix = "Traditional-finance signal."
 
-    return f"{prefix} {action}"
+    if category == "Agentic Finance":
+        category_line = "Agentic-finance signal."
+    elif category == "Crypto":
+        category_line = "Crypto / digital-asset signal."
+    else:
+        category_line = "Traditional-finance signal."
+
+    if event == "🚀 Product Launch":
+        detail = "New product or platform launch."
+    elif event == "🤝 Partnership":
+        detail = "New partnership or go-to-market collaboration."
+    elif event == "🔌 Integration":
+        detail = "New integration or workflow expansion."
+    elif event == "🏦 Fund / ETF / Index":
+        detail = "New fund, ETF, index, or investment-product development."
+    elif event == "📄 Research / Whitepaper":
+        detail = "New research, whitepaper, webinar, or market study."
+    elif event == "🧠 Agentic / AI":
+        detail = "New AI or agentic-finance development."
+    else:
+        detail = "New notable sector development."
+
+    return f"{category_line} {detail}"
 
 # -------------------------
 # FETCH FUNCTIONS
@@ -424,11 +472,9 @@ def generate_summary(title, source=""):
 
 def fetch_rss():
     items = []
-
     for name, url in RSS_SOURCES:
         try:
             feed = feedparser.parse(url)
-
             for e in feed.entries:
                 title = clean(e.get("title"))
                 link = e.get("link")
@@ -445,19 +491,16 @@ def fetch_rss():
                     "link": link,
                     "source": name
                 })
-
         except Exception as e:
             print(f"RSS fetch failed for {name}: {e}")
-
     return items
 
 
 def fetch_html_sources():
     items = []
-
     for name, url, base in HTML_SOURCES:
         try:
-            r = requests.get(url, headers=HEADERS, timeout=10)
+            r = requests.get(url, headers=HEADERS, timeout=REQUEST_TIMEOUT)
             r.raise_for_status()
             soup = BeautifulSoup(r.text, "html.parser")
 
@@ -478,20 +521,19 @@ def fetch_html_sources():
                     "link": link,
                     "source": name
                 })
-
         except Exception as e:
             print(f"HTML fetch failed for {name}: {e}")
-
     return items
 
 
 def fetch_company_blogs():
     items = []
+    failed = 0
 
     for name, url in COMPANY_BLOGS:
         try:
-            time.sleep(0.25)
-            r = requests.get(url, headers=HEADERS, timeout=10)
+            time.sleep(BLOG_SLEEP_SECONDS)
+            r = requests.get(url, headers=HEADERS, timeout=REQUEST_TIMEOUT)
             r.raise_for_status()
             soup = BeautifulSoup(r.text, "html.parser")
 
@@ -512,11 +554,11 @@ def fetch_company_blogs():
                     "link": link,
                     "source": f"{name} Blog"
                 })
-
-        except Exception as e:
-            print(f"Blog fetch failed for {name}: {e}")
+        except Exception:
+            failed += 1
             continue
 
+    print(f"Blog sources failed: {failed}")
     return items
 
 # -------------------------
@@ -531,18 +573,17 @@ def fetch_all():
 
     dedup = {}
     for item in items:
-        id_ = make_id(item["title"], item["link"])
-
         item["category"] = categorize(item["title"], item["source"])
+        item["event"] = detect_event_type(item["title"], item["source"])
         item["quality"] = quality_score(item["title"], item["source"])
         item["summary"] = generate_summary(item["title"], item["source"])
+
+        id_ = make_id(item["title"], item["link"])
 
         if id_ not in dedup:
             dedup[id_] = item
         else:
             existing = dedup[id_]
-
-            # Prefer higher-quality item; tie-break to source priority
             if item["quality"] > existing["quality"]:
                 dedup[id_] = item
             elif item["quality"] == existing["quality"]:
@@ -569,10 +610,8 @@ def group_by_top_category(items):
         "Crypto": [],
         "Agentic Finance": [],
     }
-
     for item in items:
         grouped[item["category"]].append(item)
-
     return grouped
 
 
@@ -595,13 +634,19 @@ def format_messages(items):
         current = header
 
         for i, item in enumerate(bucket_items, 1):
+            title = truncate_text(item["title"], 160)
+            summary = truncate_text(item["summary"], 110)
+            link = truncate_text(item["link"], 220)
+
             block = (
-                f"{i}) {item['title']}\n"
-                f"Summary: {item['summary']}\n"
-                f"Quality: {item['quality']}\n"
-                f"Source: {item['source']}\n"
-                f"{item['link']}\n\n"
+                f"{i}) {item['event']} {title}\n"
+                f"{summary}\n"
+                f"{item['source']}\n"
+                f"{link}\n\n"
             )
+
+            if len(block) > 1200:
+                block = truncate_text(block, 1200) + "\n\n"
 
             if len(current) + len(block) > TELEGRAM_LIMIT:
                 messages.append(current.strip())
@@ -661,6 +706,7 @@ def main():
         print(f"Curated top items sent: {len(curated)}")
 
         messages = format_messages(curated)
+        print(f"Telegram messages to send: {len(messages)}")
         send(messages)
 
         for item in curated:
