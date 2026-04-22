@@ -2,6 +2,7 @@ import os
 import re
 import json
 import html
+import time
 import hashlib
 import traceback
 import requests
@@ -18,7 +19,7 @@ HEADERS = {
     "User-Agent": "Mozilla/5.0 (FintechIntelBot)"
 }
 
-MAX_ITEMS = 1000
+TOP_N = 100
 TELEGRAM_LIMIT = 3500
 
 # -------------------------
@@ -26,7 +27,6 @@ TELEGRAM_LIMIT = 3500
 # -------------------------
 
 RSS_SOURCES = [
-    # Fintech / traditional finance / payments media
     ("TechCrunch Fintech", "https://techcrunch.com/tag/fintech/feed/"),
     ("Finextra", "https://www.finextra.com/rss/headlines.aspx"),
     ("The Paypers", "https://thepaypers.com/feed"),
@@ -39,15 +39,11 @@ RSS_SOURCES = [
     ("American Banker", "https://www.americanbanker.com/feeds/rss"),
     ("ETF.com", "https://www.etf.com/sections/news/feed"),
     ("ETF Stream", "https://www.etfstream.com/feed"),
-
-    # Crypto / digital assets media
     ("The Block", "https://www.theblock.co/rss.xml"),
     ("Decrypt", "https://decrypt.co/feed"),
     ("DL News", "https://www.dlnews.com/rss/"),
     ("CoinDesk", "https://www.coindesk.com/arc/outboundfeeds/rss/"),
     ("Cointelegraph", "https://cointelegraph.com/rss"),
-
-    # Newswires
     ("GlobeNewswire", "https://rss.globenewswire.com/news/banks-financial-services"),
     ("PR Newswire Financial Services", "https://www.prnewswire.com/rss/financial-services-latest-news.xml"),
 ]
@@ -56,20 +52,13 @@ RSS_SOURCES = [
 # HTML SOURCES
 # -------------------------
 
-HTML_SOURCES = [
-    # Intentionally left minimal for now.
-    # Add HTML-only sites here when you know their DOM is stable enough to scrape.
-]
+HTML_SOURCES = []
 
 # -------------------------
 # COMPANY BLOGS + INSTITUTIONS + ECOSYSTEM BLOGS
 # -------------------------
 
 COMPANY_BLOGS = [
-
-    # -----------------
-    # CRYPTO / DIGITAL ASSET INFRA
-    # -----------------
     ("Alchemy", "https://www.alchemy.com/blog"),
     ("Amberdata", "https://blog.amberdata.io/"),
     ("Anchorage Digital", "https://www.anchorage.com/blog"),
@@ -108,9 +97,6 @@ COMPANY_BLOGS = [
     ("Taurus", "https://www.taurushq.com/blog"),
     ("Ripple", "https://ripple.com/insights/"),
 
-    # -----------------
-    # L1 ECOSYSTEM BLOGS
-    # -----------------
     ("Bitcoin Magazine", "https://bitcoinmagazine.com/"),
     ("Ethereum", "https://blog.ethereum.org/"),
     ("Solana", "https://solana.com/news"),
@@ -121,9 +107,6 @@ COMPANY_BLOGS = [
     ("Tron", "https://tron.network/news"),
     ("TON", "https://blog.ton.org/"),
 
-    # -----------------
-    # L2 / SCALING ECOSYSTEM BLOGS
-    # -----------------
     ("Arbitrum", "https://arbitrum.io/blog/"),
     ("Base", "https://www.base.org/blog"),
     ("Optimism", "https://www.optimism.io/blog"),
@@ -132,9 +115,6 @@ COMPANY_BLOGS = [
     ("Mantle", "https://www.mantle.xyz/blog"),
     ("Polygon", "https://polygon.technology/blog"),
 
-    # -----------------
-    # MARKET DATA / INDEX / ANALYTICS
-    # -----------------
     ("AlphaSense", "https://www.alpha-sense.com/resources/"),
     ("Axioma", "https://www.axioma.com/insights"),
     ("Bloomberg", "https://www.bloomberg.com/professional/blog/"),
@@ -147,9 +127,6 @@ COMPANY_BLOGS = [
     ("Numerix", "https://www.numerix.com/resources"),
     ("S&P Global", "https://www.spglobal.com/en/research-insights/latest-news"),
 
-    # -----------------
-    # FINTECH / PAYMENTS / INFRA
-    # -----------------
     ("Plaid", "https://plaid.com/blog/"),
     ("Yodlee", "https://www.yodlee.com/blog"),
     ("Adyen", "https://www.adyen.com/blog"),
@@ -176,9 +153,6 @@ COMPANY_BLOGS = [
     ("Visa", "https://usa.visa.com/visa-everywhere/blog.html"),
     ("Wise", "https://wise.com/us/blog"),
 
-    # -----------------
-    # BROKERAGE / INFRA / MARKETS
-    # -----------------
     ("GLG", "https://glginsights.com/articles/"),
     ("Alpaca", "https://alpaca.markets/blog/"),
     ("Apex Clearing", "https://www.apexfintechsolutions.com/newsroom/"),
@@ -195,9 +169,6 @@ COMPANY_BLOGS = [
     ("SS&C Technologies", "https://www.ssctech.com/insights"),
     ("SimCorp", "https://www.simcorp.com/en/insights"),
 
-    # -----------------
-    # WEALTH / RIA
-    # -----------------
     ("Yieldstreet", "https://www.yieldstreet.com/resources/"),
     ("Addepar", "https://addepar.com/blog"),
     ("Betterment", "https://www.betterment.com/resources"),
@@ -208,9 +179,6 @@ COMPANY_BLOGS = [
     ("Wealthfront", "https://www.wealthfront.com/blog"),
     ("iCapital", "https://icapital.com/insights/"),
 
-    # -----------------
-    # INDEX PROVIDERS
-    # -----------------
     ("S&P Dow Jones", "https://www.spglobal.com/spdji/en/newsroom/"),
     ("FTSE Russell", "https://www.lseg.com/en/ftse-russell/news"),
     ("Bloomberg Indexes", "https://www.bloomberg.com/professional/blog/category/indices/"),
@@ -220,6 +188,83 @@ COMPANY_BLOGS = [
     ("Nasdaq Indexes", "https://www.nasdaq.com/news-and-insights"),
     ("MarketVector", "https://www.marketvector.com/insights"),
     ("ICE Data", "https://www.theice.com/insights"),
+]
+
+# -------------------------
+# QUALITY / CATEGORY RULES
+# -------------------------
+
+SOURCE_QUALITY = {
+    "globenewswire": 5,
+    "pr newswire": 5,
+
+    "techcrunch fintech": 4,
+    "finextra": 4,
+    "american banker": 4,
+    "the block": 4,
+    "coindesk": 4,
+
+    "the paypers": 3,
+    "pymnts": 3,
+    "paymentsjournal": 3,
+    "decrypt": 3,
+    "cointelegraph": 3,
+    "bank automation news": 3,
+    "etf.com": 3,
+    "etf stream": 3,
+    "finovate": 3,
+    "ibs intelligence": 3,
+
+    "blog": 5,
+}
+
+STRONG_POSITIVE_KEYWORDS = [
+    "launch", "launches", "launched",
+    "introduce", "introduces", "introduced",
+    "announce", "announces", "announced",
+    "unveil", "unveils", "unveiled",
+    "debut", "debuts", "debuted",
+    "partnership", "partners", "partner",
+    "integration", "integrates", "integrated",
+    "rollout", "roll out",
+    "new product", "new platform", "new solution",
+    "whitepaper", "research", "webinar",
+    "api", "platform", "solution", "index", "etf", "fund"
+]
+
+WEAK_NEGATIVE_KEYWORDS = [
+    "price prediction", "market wrap", "price analysis", "trading setup",
+    "op-ed", "opinion", "podcast", "transcript", "lawsuit",
+    "investigation", "enforcement", "macro outlook"
+]
+
+US_RELEVANCE_KEYWORDS = [
+    "u.s.", "united states", "us market", "sec", "finra",
+    "nyse", "nasdaq", "american", "u.s.-based"
+]
+
+AGENTIC_KEYWORDS = [
+    "agentic", "ai agent", "ai agents", "copilot", "assistant",
+    "autonomous", "workflow automation", "agent-based",
+    "agentic payment", "payment copilot", "investment copilot",
+    "agentic finance", "ai advisor", "ai portfolio", "robo-advisor",
+    "robo advisor", "automated investing", "autonomous payment",
+    "ai treasury", "ai invoice", "ai payable", "ai underwriting"
+]
+
+CRYPTO_KEYWORDS = [
+    "crypto", "bitcoin", "ethereum", "stablecoin", "token",
+    "tokenization", "digital asset", "blockchain", "defi", "web3",
+    "staking", "onchain", "on-chain", "wallet", "custody",
+    "exchange", "spot bitcoin", "spot ether", "solana", "arbitrum",
+    "base", "optimism", "zksync", "starknet", "polygon",
+    "aptos", "sui", "avalanche", "bnb", "tron", "ton"
+]
+
+SPECIFICITY_KEYWORDS = [
+    "index", "etf", "fund", "api", "sdk", "wallet", "custody",
+    "platform", "stablecoin", "tokenization", "settlement", "payments",
+    "card", "treasury", "lending", "advisor", "portfolio"
 ]
 
 # -------------------------
@@ -255,10 +300,8 @@ def normalize_link(base_url, href):
 
     if href.startswith("http://") or href.startswith("https://"):
         return href
-
     if href.startswith("/"):
         return base_url.rstrip("/") + href
-
     if href.startswith("#") or href.startswith("javascript:"):
         return ""
 
@@ -266,48 +309,114 @@ def normalize_link(base_url, href):
 
 
 def source_priority(source_name):
-    source_name = source_name.lower()
-
-    if "globenewswire" in source_name or "pr newswire" in source_name:
+    s = source_name.lower()
+    if "globenewswire" in s or "pr newswire" in s:
         return 1
-    if "blog" in source_name:
+    if "blog" in s:
         return 2
     return 3
 
 
+def infer_source_quality(source_name):
+    s = source_name.lower()
+
+    for key, score in SOURCE_QUALITY.items():
+        if key in s:
+            return score
+
+    return 2
+
+
+def categorize(title, source=""):
+    t = (title + " " + source).lower()
+
+    if any(keyword in t for keyword in AGENTIC_KEYWORDS):
+        return "Agentic Finance"
+
+    if any(keyword in t for keyword in CRYPTO_KEYWORDS):
+        return "Crypto"
+
+    return "Traditional Finance"
+
+
 def is_productish(title):
-    """
-    Broad, permissive filter.
-    Keeps launches, releases, partnerships, webinars, whitepapers, reports, etc.
-    """
     t = title.lower()
 
-    positive_signals = [
-        "launch", "launched", "launches",
-        "introduce", "introduced", "introduces",
-        "announce", "announced", "announces",
-        "debut", "debuts",
-        "release", "releases",
-        "roll out", "rollout",
-        "expand", "expands", "expanded",
-        "partners", "partnership", "collaboration",
-        "unveils", "unveil",
-        "new", "product", "platform", "solution",
-        "whitepaper", "report", "webinar", "research",
-        "index", "etf", "fund", "api", "integration",
-        "wallet", "agent", "copilot", "assistant",
-        "tokenization", "stablecoin", "custody", "infrastructure"
-    ]
-
-    negative_signals = [
-        "op-ed",
-        "podcast transcript",
-    ]
-
-    if any(x in t for x in negative_signals):
+    if any(x in t for x in WEAK_NEGATIVE_KEYWORDS):
         return False
 
-    return any(x in t for x in positive_signals)
+    broad_positive = STRONG_POSITIVE_KEYWORDS + [
+        "new", "product", "feature", "features", "capability", "capabilities",
+        "report", "paper", "index", "fund", "etf", "tooling", "tool",
+        "launchpad", "infrastructure", "payments", "banking", "custody"
+    ]
+
+    return any(x in t for x in broad_positive)
+
+
+def quality_score(title, source=""):
+    t = (title + " " + source).lower()
+    score = 0
+
+    # 1. Source quality (0-5)
+    score += infer_source_quality(source)
+
+    # 2. Product-development intent (0-5)
+    intent_hits = sum(1 for kw in STRONG_POSITIVE_KEYWORDS if kw in t)
+    score += min(intent_hits, 5)
+
+    # 3. Specificity / named product-like signals (0-3)
+    specificity_hits = sum(1 for kw in SPECIFICITY_KEYWORDS if kw in t)
+    score += min(specificity_hits, 3)
+
+    # 4. U.S. relevance (0-2)
+    us_hits = sum(1 for kw in US_RELEVANCE_KEYWORDS if kw in t)
+    score += min(us_hits, 2)
+
+    # 5. Category relevance bonus (0-2)
+    if categorize(title, source) == "Agentic Finance":
+        score += 2
+    elif categorize(title, source) == "Crypto":
+        score += 1
+
+    # Negative adjustments
+    if any(x in t for x in WEAK_NEGATIVE_KEYWORDS):
+        score -= 3
+
+    # Reward title richness
+    if len(title) > 60:
+        score += 1
+
+    return score
+
+
+def generate_summary(title, source=""):
+    t = (title + " " + source).lower()
+
+    if "partnership" in t or "partners" in t or "partner" in t:
+        action = "New partnership or go-to-market collaboration."
+    elif "launch" in t or "introduce" in t or "unveil" in t or "debut" in t:
+        action = "New product or platform launch."
+    elif "integration" in t:
+        action = "New product integration or workflow expansion."
+    elif "whitepaper" in t or "research" in t or "report" in t:
+        action = "New research or product-related market analysis."
+    elif "webinar" in t:
+        action = "Webinar tied to new capabilities or product strategy."
+    elif "index" in t or "etf" in t or "fund" in t:
+        action = "New investment product, index, or fund-related announcement."
+    else:
+        action = "New development relevant to the sector."
+
+    category = categorize(title, source)
+    if category == "Agentic Finance":
+        prefix = "Agentic-finance signal."
+    elif category == "Crypto":
+        prefix = "Crypto / digital-asset signal."
+    else:
+        prefix = "Traditional-finance signal."
+
+    return f"{prefix} {action}"
 
 # -------------------------
 # FETCH FUNCTIONS
@@ -326,10 +435,8 @@ def fetch_rss():
 
                 if not title or not link:
                     continue
-
                 if len(title) < 20:
                     continue
-
                 if not is_productish(title):
                     continue
 
@@ -350,7 +457,7 @@ def fetch_html_sources():
 
     for name, url, base in HTML_SOURCES:
         try:
-            r = requests.get(url, headers=HEADERS, timeout=20)
+            r = requests.get(url, headers=HEADERS, timeout=10)
             r.raise_for_status()
             soup = BeautifulSoup(r.text, "html.parser")
 
@@ -361,10 +468,8 @@ def fetch_html_sources():
 
                 if not title or not link:
                     continue
-
                 if len(title) < 25:
                     continue
-
                 if not is_productish(title):
                     continue
 
@@ -385,7 +490,8 @@ def fetch_company_blogs():
 
     for name, url in COMPANY_BLOGS:
         try:
-            r = requests.get(url, headers=HEADERS, timeout=20)
+            time.sleep(0.25)
+            r = requests.get(url, headers=HEADERS, timeout=10)
             r.raise_for_status()
             soup = BeautifulSoup(r.text, "html.parser")
 
@@ -396,10 +502,8 @@ def fetch_company_blogs():
 
                 if not title or not link:
                     continue
-
                 if len(title) < 25:
                     continue
-
                 if not is_productish(title):
                     continue
 
@@ -416,41 +520,6 @@ def fetch_company_blogs():
     return items
 
 # -------------------------
-# CATEGORY
-# -------------------------
-
-def categorize(title, source=""):
-    t = (title + " " + source).lower()
-
-    agentic_keywords = [
-        "agentic", "ai agent", "ai agents", "copilot", "assistant",
-        "autonomous", "workflow automation", "agent-based",
-        "agentic payment", "payment copilot", "investment copilot",
-        "agentic finance", "ai advisor", "ai portfolio", "robo-advisor",
-        "robo advisor", "automated investing", "autonomous payment",
-        "ai treasury", "ai invoice", "ai payable", "ai underwriting"
-    ]
-
-    crypto_keywords = [
-        "crypto", "bitcoin", "ethereum", "stablecoin", "token",
-        "tokenization", "digital asset", "blockchain", "defi", "web3",
-        "staking", "onchain", "on-chain", "wallet", "custody",
-        "exchange", "spot bitcoin", "spot ether", "coinbase",
-        "kraken", "circle", "grayscale", "bitwise", "hashdex",
-        "solana", "ethereum", "base", "arbitrum", "optimism",
-        "zksync", "starknet", "polygon", "aptos", "sui",
-        "avalanche", "bnb", "tron", "ton"
-    ]
-
-    if any(keyword in t for keyword in agentic_keywords):
-        return "Agentic Finance"
-
-    if any(keyword in t for keyword in crypto_keywords):
-        return "Crypto"
-
-    return "Traditional Finance"
-
-# -------------------------
 # MAIN FETCH
 # -------------------------
 
@@ -464,15 +533,24 @@ def fetch_all():
     for item in items:
         id_ = make_id(item["title"], item["link"])
 
+        item["category"] = categorize(item["title"], item["source"])
+        item["quality"] = quality_score(item["title"], item["source"])
+        item["summary"] = generate_summary(item["title"], item["source"])
+
         if id_ not in dedup:
             dedup[id_] = item
         else:
             existing = dedup[id_]
-            if source_priority(item["source"]) < source_priority(existing["source"]):
+
+            # Prefer higher-quality item; tie-break to source priority
+            if item["quality"] > existing["quality"]:
                 dedup[id_] = item
+            elif item["quality"] == existing["quality"]:
+                if source_priority(item["source"]) < source_priority(existing["source"]):
+                    dedup[id_] = item
 
     results = list(dedup.values())
-    results.sort(key=lambda x: (categorize(x["title"], x["source"]), x["source"], x["title"]))
+    results.sort(key=lambda x: (-x["quality"], x["category"], x["source"], x["title"]))
 
     print(f"Total items collected after dedup: {len(results)}")
     return results
@@ -480,6 +558,10 @@ def fetch_all():
 # -------------------------
 # FORMAT
 # -------------------------
+
+def top_items(items):
+    return items[:TOP_N]
+
 
 def group_by_top_category(items):
     grouped = {
@@ -489,7 +571,7 @@ def group_by_top_category(items):
     }
 
     for item in items:
-        grouped[categorize(item["title"], item["source"])].append(item)
+        grouped[item["category"]].append(item)
 
     return grouped
 
@@ -497,22 +579,26 @@ def group_by_top_category(items):
 def format_messages(items):
     today = datetime.now().strftime("%b %d, %Y")
     grouped = group_by_top_category(items)
-
     messages = []
 
     for bucket in ["Traditional Finance", "Crypto", "Agentic Finance"]:
         bucket_items = grouped[bucket]
-
         if not bucket_items:
             continue
 
-        header = f"Daily Fintech Intelligence — {today}\n\n{bucket}\n\n"
-        current = header
-        counter = 1
+        header = (
+            f"Daily Fintech Intelligence — {today}\n\n"
+            f"{bucket}\n"
+            f"Top curated items by quality\n\n"
+        )
 
-        for item in bucket_items:
+        current = header
+
+        for i, item in enumerate(bucket_items, 1):
             block = (
-                f"{counter}) {item['title']}\n"
+                f"{i}) {item['title']}\n"
+                f"Summary: {item['summary']}\n"
+                f"Quality: {item['quality']}\n"
                 f"Source: {item['source']}\n"
                 f"{item['link']}\n\n"
             )
@@ -522,8 +608,6 @@ def format_messages(items):
                 current = header + block
             else:
                 current += block
-
-            counter += 1
 
         if current.strip():
             messages.append(current.strip())
@@ -570,12 +654,18 @@ def main():
             id_ = make_id(item["title"], item["link"])
             if id_ not in seen:
                 new_items.append(item)
-                seen.add(id_)
 
-        print(f"New items: {len(new_items)}")
+        print(f"New items before quality curation: {len(new_items)}")
 
-        messages = format_messages(new_items)
+        curated = top_items(new_items)
+        print(f"Curated top items sent: {len(curated)}")
+
+        messages = format_messages(curated)
         send(messages)
+
+        for item in curated:
+            seen.add(make_id(item["title"], item["link"]))
+
         save_seen(seen)
 
     except Exception as e:
