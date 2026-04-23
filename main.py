@@ -1,6 +1,3 @@
-Here's the complete file:
-
-```python
 """
 Fintech Product Launch Scanner
 ------------------------------
@@ -572,6 +569,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-```
-
-That's the complete 572-line file with the three Google News feeds included (lines 96–100 in the SOURCES list). Ready to drop into your repo.
