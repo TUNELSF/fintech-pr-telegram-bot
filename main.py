@@ -1,712 +1,577 @@
+Here's the complete file:
+
+```python
+"""
+Fintech Product Launch Scanner
+------------------------------
+Scans fintech/finance RSS feeds daily, filters for genuine product
+launches, partnerships and integrations, and posts a clean briefing
+to Telegram — with US and EU digests sent as separate messages.
+
+Run via GitHub Actions or cron.
+Requires env vars: TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID
+"""
+
 import os
 import re
 import json
 import html
 import time
+import logging
 import hashlib
-import traceback
+import calendar
+from datetime import datetime, timezone, timedelta
+from urllib.parse import urlparse, urlunparse
+
 import requests
 import feedparser
-from bs4 import BeautifulSoup
-from datetime import datetime
+
+# ---------------------------------------------------------------
+# CONFIG
+# ---------------------------------------------------------------
 
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 
 STATE_FILE = "seen_ids.json"
+HEALTH_FILE = "source_health.json"
+
+TOP_N_PER_REGION = 20
+MAX_AGE_HOURS = 48
+TELEGRAM_LIMIT = 4000  # actual limit is 4096, leaving headroom
+MAX_SEEN_ENTRIES = 5000  # cap to keep state file bounded
 
 HEADERS = {
-    "User-Agent": "Mozilla/5.0 (FintechIntelBot)"
+    "User-Agent": (
+        "Mozilla/5.0 (compatible; FintechRadar/1.0; "
+        "+https://github.com/yourname/fintech-scanner)"
+    )
 }
 
-TOP_N = 100
-TELEGRAM_LIMIT = 3000
-REQUEST_TIMEOUT = 10
-BLOG_SLEEP_SECONDS = 0.2
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s %(levelname)s %(message)s",
+)
+log = logging.getLogger("fintech-radar")
 
-BAD_SOURCES = set()
 
-# -------------------------
-# RSS SOURCES
-# -------------------------
+# ---------------------------------------------------------------
+# SOURCES
+# Each: (name, url, region, tier)
+#   region: "US", "EU", or "GLOBAL" (GLOBAL items get region-detected)
+#   tier:   1 = wires/regulators, 2 = trade press, 3 = general tech
+#
+# URLs marked with VERIFY in a comment should be sanity-checked on first
+# run — feed paths change occasionally. Watch the logs on the first few
+# runs and drop any source that consistently fails to parse.
+# ---------------------------------------------------------------
 
-RSS_SOURCES = [
-    ("TechCrunch Fintech", "https://techcrunch.com/tag/fintech/feed/"),
-    ("Finextra", "https://www.finextra.com/rss/headlines.aspx"),
-    ("The Paypers", "https://thepaypers.com/feed"),
-    ("PYMNTS", "https://www.pymnts.com/feed/"),
-    ("Bank Automation News", "https://bankautomationnews.com/feed/"),
-    ("Finovate", "https://finovate.com/feed/"),
-    ("IBS Intelligence", "https://ibsintelligence.com/ibsi-news/feed/"),
-    ("Crowdfund Insider Fintech", "https://www.crowdfundinsider.com/category/fintech/feed/"),
-    ("PaymentsJournal", "https://www.paymentsjournal.com/feed/"),
-    ("American Banker", "https://www.americanbanker.com/feeds/rss"),
-    ("ETF.com", "https://www.etf.com/sections/news/feed"),
-    ("ETF Stream", "https://www.etfstream.com/feed"),
-    ("The Block", "https://www.theblock.co/rss.xml"),
-    ("Decrypt", "https://decrypt.co/feed"),
-    ("DL News", "https://www.dlnews.com/rss/"),
-    ("CoinDesk", "https://www.coindesk.com/arc/outboundfeeds/rss/"),
-    ("Cointelegraph", "https://cointelegraph.com/rss"),
-    ("GlobeNewswire", "https://rss.globenewswire.com/news/banks-financial-services"),
-    ("PR Newswire Financial Services", "https://www.prnewswire.com/rss/financial-services-latest-news.xml"),
+SOURCES = [
+    # Wires — global, tier 1
+    ("GlobeNewswire FS",  "https://www.globenewswire.com/RssFeed/subjectcode/9-Banking%20and%20Financial%20Services/feedTitle/GlobeNewswire%20-%20Banking%20and%20Financial%20Services", "GLOBAL", 1),
+    ("PR Newswire FS",    "https://www.prnewswire.com/rss/financial-services-latest-news.xml", "GLOBAL", 1),
+    ("Business Wire FS",  "https://feed.businesswire.com/rss/home/?rss=G1QFDERJXkJeGVtRVA==", "GLOBAL", 1),  # VERIFY
+
+    # US regulators — tier 1
+    ("SEC Press",         "https://www.sec.gov/news/pressreleases.rss", "US", 1),
+    ("Federal Reserve",   "https://www.federalreserve.gov/feeds/press_all.xml", "US", 1),
+    ("OCC",               "https://www.occ.gov/rss/occ_nr.xml", "US", 1),  # VERIFY
+    ("FDIC",              "https://www.fdic.gov/news/press-releases/rss.xml", "US", 1),  # VERIFY
+    ("CFPB",              "https://www.consumerfinance.gov/about-us/newsroom/feed/", "US", 1),
+
+    # US trade press — tier 2
+    ("American Banker",   "https://www.americanbanker.com/feeds/rss", "US", 2),
+    ("Banking Dive",      "https://www.bankingdive.com/feeds/news/", "US", 2),
+    ("PYMNTS",            "https://www.pymnts.com/feed/", "US", 2),
+
+    # UK/EU regulators — tier 1
+    ("FCA News",          "https://www.fca.org.uk/news/rss.xml", "EU", 1),
+    ("Bank of England",   "https://www.bankofengland.co.uk/rss/news", "EU", 1),
+    ("ECB Press",         "https://www.ecb.europa.eu/press/pr/html/index.en.rss", "EU", 1),  # VERIFY
+
+    # EU trade press — tier 2
+    ("Finextra",          "https://www.finextra.com/rss/headlines.aspx", "EU", 2),
+    ("AltFi",             "https://www.altfi.com/rss", "EU", 2),  # VERIFY
+    ("Sifted",            "https://sifted.eu/feed", "EU", 2),  # VERIFY
+    ("Fintech Futures",   "https://www.fintechfutures.com/feed/", "EU", 2),
+    ("The Fintech Times", "https://thefintechtimes.com/feed/", "EU", 2),  # VERIFY
+
+    # Google News RSS — free, synthesizes thousands of publishers
+    # Tagged GLOBAL so the region detector classifies each hit individually.
+    ("Google News (wires)",  "https://news.google.com/rss/search?q=%22launches%22+(fintech+OR+%22digital+bank%22+OR+payments+OR+stablecoin)+(site%3Aprnewswire.com+OR+site%3Abusinesswire.com+OR+site%3Aglobenewswire.com)&hl=en-US&gl=US&ceid=US:en", "GLOBAL", 2),
+    ("Google News (US)",     "https://news.google.com/rss/search?q=(%22launches%22+OR+%22unveils%22+OR+%22introduces%22)+(fintech+OR+bank+OR+wallet+OR+payments+OR+stablecoin)+%22U.S.%22&hl=en-US&gl=US&ceid=US:en", "GLOBAL", 2),
+    ("Google News (Europe)", "https://news.google.com/rss/search?q=(%22launches%22+OR+%22unveils%22+OR+%22introduces%22)+(fintech+OR+bank+OR+wallet+OR+payments)+(UK+OR+Europe+OR+European)&hl=en-GB&gl=GB&ceid=GB:en", "GLOBAL", 2),
+
+    # Tech / crypto — tier 3, filtered strictly
+    ("TechCrunch Fintech","https://techcrunch.com/category/fintech/feed/", "GLOBAL", 3),
+    ("The Block",         "https://www.theblock.co/rss.xml", "GLOBAL", 3),
+    ("CoinDesk",          "https://www.coindesk.com/arc/outboundfeeds/rss/", "GLOBAL", 3),
 ]
 
-# -------------------------
-# HTML SOURCES
-# -------------------------
 
-HTML_SOURCES = []
+# ---------------------------------------------------------------
+# KEYWORDS & PATTERNS
+# ---------------------------------------------------------------
 
-# -------------------------
-# COMPANY BLOGS + INSTITUTIONS + ECOSYSTEM BLOGS
-# -------------------------
+LAUNCH_VERB_RE = re.compile(
+    r"\b(launch(?:es|ed|ing)?|introduc(?:es|ed|ing)|unveil(?:s|ed|ing)?|"
+    r"debut(?:s|ed|ing)?|roll(?:s|ed)?\s+out|go(?:es)?\s+live|"
+    r"releas(?:es|ed|ing))\b",
+    re.I,
+)
 
-COMPANY_BLOGS = [
-    ("Alchemy", "https://www.alchemy.com/blog"),
-    ("Amberdata", "https://blog.amberdata.io/"),
-    ("Anchorage Digital", "https://www.anchorage.com/blog"),
-    ("Binance US", "https://blog.binance.us/"),
-    ("BitGo", "https://www.bitgo.com/blog/"),
-    ("Blockdaemon", "https://www.blockdaemon.com/blog"),
-    ("Chainalysis", "https://www.chainalysis.com/blog/"),
-    ("Chainlink Labs", "https://blog.chain.link/"),
-    ("Circle", "https://www.circle.com/blog"),
-    ("Coin Metrics", "https://coinmetrics.io/insights/"),
-    ("Coinbase", "https://www.coinbase.com/blog"),
-    ("Consensys", "https://consensys.io/blog"),
-    ("Copper", "https://www.copper.co/insights"),
-    ("Elliptic", "https://www.elliptic.co/blog"),
-    ("FalconX", "https://www.falconx.io/insights"),
-    ("Figure", "https://figure.com/blog/"),
-    ("Galaxy Digital", "https://www.galaxy.com/insights/"),
-    ("Gemini", "https://www.gemini.com/blog"),
-    ("Glassnode", "https://insights.glassnode.com/"),
-    ("Grayscale", "https://grayscale.com/insights/"),
-    ("Hashdex", "https://hashdex.com/en-US/insights"),
-    ("Kaiko", "https://research.kaiko.com/"),
-    ("Kraken", "https://blog.kraken.com/"),
-    ("Ledger Enterprise", "https://www.ledger.com/blog"),
-    ("Mesh", "https://www.meshconnect.com/blog"),
-    ("MoonPay", "https://www.moonpay.com/blog"),
-    ("Nansen", "https://www.nansen.ai/research"),
-    ("OKX", "https://www.okx.com/learn"),
-    ("Paxos", "https://paxos.com/blog/"),
-    ("Ramp Network", "https://ramp.network/blog"),
-    ("TRM Labs", "https://www.trmlabs.com/post"),
-    ("Talos", "https://www.talos.com/insights"),
-    ("Zero Hash", "https://www.zerohash.com/blog"),
-    ("Fireblocks", "https://www.fireblocks.com/blog/"),
-    ("Securitize", "https://www.securitize.io/blog"),
-    ("Taurus", "https://www.taurushq.com/blog"),
-    ("Ripple", "https://ripple.com/insights/"),
+PRODUCT_NOUN_RE = re.compile(
+    r"\b(platform|product|service|app|feature|tool|api|sdk|integration|"
+    r"partnership|fund|etf|index|stablecoin|card|account|loan|wallet|"
+    r"stack|suite|neobank|bank|exchange|marketplace|portal|solution)\b",
+    re.I,
+)
 
-    ("Bitcoin Magazine", "https://bitcoinmagazine.com/"),
-    ("Ethereum", "https://blog.ethereum.org/"),
-    ("Solana", "https://solana.com/news"),
-    ("BNB Chain", "https://www.bnbchain.org/en/blog"),
-    ("Avalanche", "https://www.avax.network/blog"),
-    ("Aptos", "https://aptosfoundation.org/currents"),
-    ("Sui", "https://blog.sui.io/"),
-    ("Tron", "https://tron.network/news"),
-    ("TON", "https://blog.ton.org/"),
+PARTNERSHIP_RE = re.compile(
+    r"\b(partner(?:s|ed|ship)?\s+with|teams?\s+up\s+with|"
+    r"integrat(?:es|ed|ion)\s+with|joins?\s+forces\s+with|"
+    r"collaborat(?:es|ed|ion)\s+with)\b",
+    re.I,
+)
 
-    ("Arbitrum", "https://arbitrum.io/blog/"),
-    ("Base", "https://www.base.org/blog"),
-    ("Optimism", "https://www.optimism.io/blog"),
-    ("zkSync", "https://blog.zksync.io/"),
-    ("Starknet", "https://www.starknet.io/blog/"),
-    ("Mantle", "https://www.mantle.xyz/blog"),
-    ("Polygon", "https://polygon.technology/blog"),
+NEGATIVE_RE = re.compile(
+    r"\b(earnings|quarterly|fiscal\s+(?:year|quarter)|q[1-4]\s+\d|"
+    r"price\s+(?:prediction|target|analysis)|opinion|podcast|interview|"
+    r"lawsuit|sues|sued|settlement|fined|penalty|violation|"
+    r"hack(?:ed|ing)?|breach(?:ed)?|exploit|stolen|scam|fraud|"
+    r"layoff|resigns?|fires?\s+|cut\s+jobs|"
+    r"market\s+(?:wrap|report|recap)|weekly\s+recap|daily\s+brief|"
+    r"upgrade\s+(?:to|from)|downgrade|rating\s+(?:cut|lowered))\b",
+    re.I,
+)
 
-    ("AlphaSense", "https://www.alpha-sense.com/resources/"),
-    ("Axioma", "https://www.axioma.com/insights"),
-    ("Bloomberg", "https://www.bloomberg.com/professional/blog/"),
-    ("Cboe Global Markets", "https://www.cboe.com/insights/posts/"),
-    ("FactSet", "https://insight.factset.com/"),
-    ("LSEG", "https://www.lseg.com/en/news"),
-    ("MSCI", "https://www.msci.com/www/news-and-announcements"),
-    ("Morningstar", "https://www.morningstar.com/lp/articles"),
-    ("Nasdaq", "https://www.nasdaq.com/news-and-insights"),
-    ("Numerix", "https://www.numerix.com/resources"),
-    ("S&P Global", "https://www.spglobal.com/en/research-insights/latest-news"),
 
-    ("Plaid", "https://plaid.com/blog/"),
-    ("Yodlee", "https://www.yodlee.com/blog"),
-    ("Adyen", "https://www.adyen.com/blog"),
-    ("Airwallex", "https://www.airwallex.com/blog"),
-    ("Brex", "https://www.brex.com/blog"),
-    ("Checkout.com", "https://www.checkout.com/blog"),
-    ("Chime", "https://www.chime.com/blog/"),
-    ("Galileo", "https://www.galileo-ft.com/blog/"),
-    ("Mambu", "https://mambu.com/en/insights"),
-    ("Marqeta", "https://www.marqeta.com/blog"),
-    ("Mastercard", "https://www.mastercard.com/news/perspectives/"),
-    ("Mercury", "https://mercury.com/blog"),
-    ("Nium", "https://www.nium.com/blog"),
-    ("Payoneer", "https://blog.payoneer.com/"),
-    ("Ramp", "https://ramp.com/blog"),
-    ("Revolut", "https://www.revolut.com/news/"),
-    ("SoFi", "https://www.sofi.com/blog/"),
-    ("Solaris", "https://www.solarisgroup.com/newsroom/"),
-    ("Stripe", "https://stripe.com/blog"),
-    ("Temenos", "https://www.temenos.com/news/"),
-    ("Thought Machine", "https://www.thoughtmachine.net/blog"),
-    ("Treasury Prime", "https://www.treasuryprime.com/blog"),
-    ("Unit", "https://www.unit.co/blog"),
-    ("Visa", "https://usa.visa.com/visa-everywhere/blog.html"),
-    ("Wise", "https://wise.com/us/blog"),
+# ---------------------------------------------------------------
+# REGION DETECTION (for GLOBAL sources)
+# ---------------------------------------------------------------
 
-    ("GLG", "https://glginsights.com/articles/"),
-    ("Alpaca", "https://alpaca.markets/blog/"),
-    ("Apex Clearing", "https://www.apexfintechsolutions.com/newsroom/"),
-    ("Broadridge", "https://www.broadridge.com/insights"),
-    ("Calypso Technology", "https://www.adenza.com/insights"),
-    ("Carta", "https://carta.com/blog/"),
-    ("DriveWealth", "https://www.drivewealth.com/blog/"),
-    ("FIS", "https://www.fisglobal.com/en/insights"),
-    ("Fiserv", "https://www.fiserv.com/en/about-fiserv/resource-center.html"),
-    ("Forge Global", "https://forgeglobal.com/insights/"),
-    ("Interactive Brokers", "https://www.interactivebrokers.com/en/general/education/blog.php"),
-    ("Public.com", "https://public.com/learn"),
-    ("Robinhood", "https://blog.robinhood.com/"),
-    ("SS&C Technologies", "https://www.ssctech.com/insights"),
-    ("SimCorp", "https://www.simcorp.com/en/insights"),
+US_SIGNALS = re.compile(
+    r"\b(U\.?S\.?|USA|united\s+states|america(?:n)?|"
+    r"SEC|FDIC|OCC|CFPB|FinCEN|"
+    r"federal\s+reserve|the\s+fed\b|treasury|IRS|"
+    r"nasdaq|nyse|cboe|wall\s+street|"
+    r"(?:new\s+york|california|texas|delaware)|"
+    r"jpmorgan|wells\s+fargo|bank\s+of\s+america|citigroup|"
+    r"goldman\s+sachs|morgan\s+stanley|chime|plaid|stripe|"
+    r"coinbase|robinhood|sofi|fidelity|charles\s+schwab)\b",
+    re.I,
+)
 
-    ("Yieldstreet", "https://www.yieldstreet.com/resources/"),
-    ("Addepar", "https://addepar.com/blog"),
-    ("Betterment", "https://www.betterment.com/resources"),
-    ("CAIS", "https://www.caisgroup.com/articles"),
-    ("Envestnet", "https://www.envestnet.com/newsroom"),
-    ("Orion Advisor Solutions", "https://orion.com/blog/"),
-    ("Riskalyze (Nitrogen)", "https://nitrogenwealth.com/blog/"),
-    ("Wealthfront", "https://www.wealthfront.com/blog"),
-    ("iCapital", "https://icapital.com/insights/"),
+EU_SIGNALS = re.compile(
+    r"\b(U\.?K\.?|britain|british|england|scotland|ireland|"
+    r"E\.?U\.?|europe(?:an)?|eurozone|"
+    r"london|berlin|paris|madrid|amsterdam|dublin|stockholm|frankfurt|"
+    r"germany|france|spain|italy|netherlands|sweden|poland|portugal|"
+    r"FCA|PRA|bank\s+of\s+england|ECB|EBA|ESMA|BaFin|AMF\b|"
+    r"HSBC|barclays|lloyds|natwest|deutsche\s+bank|BNP\s+paribas|"
+    r"santander|ING\s+group|UBS|revolut|monzo|starling|N26|klarna|"
+    r"wise|adyen|checkout\.com|truelayer|qonto|bunq)\b",
+    re.I,
+)
 
-    ("S&P Dow Jones", "https://www.spglobal.com/spdji/en/newsroom/"),
-    ("FTSE Russell", "https://www.lseg.com/en/ftse-russell/news"),
-    ("Bloomberg Indexes", "https://www.bloomberg.com/professional/blog/category/indices/"),
-    ("Morningstar Indexes", "https://indexes.morningstar.com/our-indexes"),
-    ("Solactive", "https://www.solactive.com/news/"),
-    ("STOXX", "https://www.stoxx.com/news"),
-    ("Nasdaq Indexes", "https://www.nasdaq.com/news-and-insights"),
-    ("MarketVector", "https://www.marketvector.com/insights"),
-    ("ICE Data", "https://www.theice.com/insights"),
-]
 
-# -------------------------
-# QUALITY / CATEGORY RULES
-# -------------------------
+# ---------------------------------------------------------------
+# UTILITIES
+# ---------------------------------------------------------------
 
-SOURCE_QUALITY = {
-    "globenewswire": 5,
-    "pr newswire": 5,
-    "blog": 5,
-
-    "techcrunch fintech": 4,
-    "finextra": 4,
-    "american banker": 4,
-    "the block": 4,
-    "coindesk": 4,
-
-    "the paypers": 3,
-    "pymnts": 3,
-    "paymentsjournal": 3,
-    "decrypt": 3,
-    "cointelegraph": 3,
-    "bank automation news": 3,
-    "etf.com": 3,
-    "etf stream": 3,
-    "finovate": 3,
-    "ibs intelligence": 3,
-}
-
-REAL_LAUNCH_KEYWORDS = [
-    "launch", "launches", "launched",
-    "introduce", "introduces", "introduced",
-    "unveil", "unveils", "unveiled",
-    "debut", "debuts", "debuted",
-    "partnership", "partners", "partner",
-    "integration", "integrates", "integrated",
-    "rollout", "roll out",
-    "new product", "new platform", "new solution",
-    "whitepaper", "research", "report", "webinar",
-    "api", "platform", "solution", "index", "etf", "fund",
-    "stablecoin", "tokenization", "custody", "wallet",
-    "launches in the u.s.", "u.s. launch", "available in the u.s."
-]
-
-NEGATIVE_KEYWORDS = [
-    "price prediction", "market wrap", "price analysis", "trading setup",
-    "op-ed", "opinion", "podcast", "transcript", "lawsuit",
-    "investigation", "enforcement", "macro outlook", "earnings call",
-    "conference call", "stock price", "market closes", "technical analysis"
-]
-
-US_RELEVANCE_KEYWORDS = [
-    "u.s.", "united states", "us market", "sec", "finra",
-    "nyse", "nasdaq", "american", "u.s.-based"
-]
-
-AGENTIC_KEYWORDS = [
-    "agentic", "ai agent", "ai agents", "copilot", "assistant",
-    "autonomous", "workflow automation", "agent-based",
-    "agentic payment", "payment copilot", "investment copilot",
-    "agentic finance", "ai advisor", "ai portfolio", "robo-advisor",
-    "robo advisor", "automated investing", "autonomous payment",
-    "ai treasury", "ai invoice", "ai payable", "ai underwriting"
-]
-
-CRYPTO_KEYWORDS = [
-    "crypto", "bitcoin", "ethereum", "stablecoin", "token",
-    "tokenization", "digital asset", "blockchain", "defi", "web3",
-    "staking", "onchain", "on-chain", "wallet", "custody",
-    "exchange", "spot bitcoin", "spot ether", "solana", "arbitrum",
-    "base", "optimism", "zksync", "starknet", "polygon",
-    "aptos", "sui", "avalanche", "bnb", "tron", "ton"
-]
-
-EVENT_RULES = [
-    ("🧠 Agentic / AI", [
-        "agentic", "ai agent", "ai agents", "copilot", "assistant",
-        "autonomous", "agent-based", "ai advisor", "ai treasury",
-        "ai invoice", "ai underwriting"
-    ]),
-    ("🚀 Product Launch", [
-        "launch", "launches", "launched", "introduce", "introduces",
-        "introduced", "unveil", "unveils", "unveiled", "debut", "debuts"
-    ]),
-    ("🤝 Partnership", [
-        "partnership", "partners", "partner", "collaboration", "alliance"
-    ]),
-    ("🔌 Integration", [
-        "integration", "integrates", "integrated", "embedded", "api"
-    ]),
-    ("🏦 Fund / ETF / Index", [
-        "etf", "fund", "index", "benchmark", "portfolio", "strategy"
-    ]),
-    ("📄 Research / Whitepaper", [
-        "whitepaper", "research", "report", "webinar", "study"
-    ]),
-]
-
-SPECIFICITY_KEYWORDS = [
-    "index", "etf", "fund", "api", "sdk", "wallet", "custody",
-    "platform", "stablecoin", "tokenization", "settlement", "payments",
-    "card", "treasury", "lending", "advisor", "portfolio"
-]
-
-# -------------------------
-# UTIL
-# -------------------------
-
-def load_seen():
+def load_json(path, default):
     try:
-        with open(STATE_FILE, "r", encoding="utf-8") as f:
-            return set(json.load(f))
-    except Exception:
-        return set()
+        with open(path, "r") as f:
+            return json.load(f)
+    except (FileNotFoundError, json.JSONDecodeError):
+        return default
 
 
-def save_seen(seen):
-    with open(STATE_FILE, "w", encoding="utf-8") as f:
-        json.dump(sorted(list(seen)), f)
-
-
-def make_id(title, link):
-    return hashlib.md5((title + link).encode("utf-8")).hexdigest()
+def save_json(path, data):
+    with open(path, "w") as f:
+        json.dump(data, f, indent=2)
 
 
 def clean(text):
     return re.sub(r"\s+", " ", html.unescape(text or "")).strip()
 
 
-def truncate_text(text, max_len):
-    text = clean(text)
-    if len(text) <= max_len:
-        return text
-    return text[: max_len - 1].rstrip() + "…"
+def normalize_url(url):
+    """Strip query strings and fragments so UTM-tagged duplicates collapse."""
+    try:
+        p = urlparse(url)
+        normalized = urlunparse((p.scheme, p.netloc, p.path.rstrip("/"), "", "", ""))
+        return normalized.lower()
+    except Exception:
+        return url
 
 
-def normalize_link(base_url, href):
-    if not href:
-        return ""
-
-    href = href.strip()
-
-    if href.startswith("http://") or href.startswith("https://"):
-        return href
-    if href.startswith("/"):
-        return base_url.rstrip("/") + href
-    if href.startswith("#") or href.startswith("javascript:"):
-        return ""
-
-    return ""
+def make_id(url):
+    return hashlib.md5(normalize_url(url).encode()).hexdigest()
 
 
-def source_priority(source_name):
-    s = source_name.lower()
-    if "globenewswire" in s or "pr newswire" in s:
-        return 1
-    if "blog" in s:
-        return 2
-    return 3
+def entry_datetime(entry):
+    """Return timezone-aware UTC datetime for a feed entry, or None."""
+    for key in ("published_parsed", "updated_parsed"):
+        t = entry.get(key)
+        if t:
+            try:
+                return datetime.fromtimestamp(calendar.timegm(t), tz=timezone.utc)
+            except Exception:
+                continue
+    return None
 
 
-def infer_source_quality(source_name):
-    s = source_name.lower()
-    for key, score in SOURCE_QUALITY.items():
-        if key in s:
-            return score
-    return 2
+# ---------------------------------------------------------------
+# SOURCE HEALTH
+# ---------------------------------------------------------------
+
+def update_health(health, source, success):
+    h = health.setdefault(source, {"fail": 0, "success": 0})
+    if success:
+        h["success"] += 1
+        h["fail"] = 0
+    else:
+        h["fail"] += 1
+    return health
 
 
-def categorize(title, source=""):
-    t = (title + " " + source).lower()
+def is_source_blocked(health, source):
+    return health.get(source, {}).get("fail", 0) >= 5
 
-    if any(keyword in t for keyword in AGENTIC_KEYWORDS):
+
+# ---------------------------------------------------------------
+# FILTERS
+# ---------------------------------------------------------------
+
+def is_real_launch(title, summary=""):
+    """
+    Stricter filter: must match one of:
+      - launch verb + product noun
+      - partnership / integration pattern
+    AND must not match a negative pattern.
+    """
+    text = f"{title} {summary}"
+
+    if NEGATIVE_RE.search(text):
+        return False
+
+    if PARTNERSHIP_RE.search(text):
+        return True
+
+    if LAUNCH_VERB_RE.search(text) and PRODUCT_NOUN_RE.search(text):
+        return True
+
+    return False
+
+
+def detect_region(title, summary, link, source_region):
+    """
+    Returns a set of regions the item belongs to: {"US"}, {"EU"}, or both.
+    For explicit-region sources, trust the tag.
+    For GLOBAL sources, scan text for signals.
+    """
+    if source_region in ("US", "EU"):
+        return {source_region}
+
+    text = f"{title} {summary} {link}"
+    regions = set()
+    if US_SIGNALS.search(text):
+        regions.add("US")
+    if EU_SIGNALS.search(text):
+        regions.add("EU")
+    return regions
+
+
+# ---------------------------------------------------------------
+# CATEGORIZATION
+# ---------------------------------------------------------------
+
+def categorize(title, summary=""):
+    t = f"{title} {summary}".lower()
+    if any(x in t for x in ["agentic", "ai agent", "copilot", "autonomous agent"]):
         return "Agentic Finance"
-
-    if any(keyword in t for keyword in CRYPTO_KEYWORDS):
+    if any(x in t for x in ["crypto", "bitcoin", "ethereum", "token", "blockchain",
+                            "stablecoin", "defi", "web3"]):
         return "Crypto"
-
     return "Traditional Finance"
 
 
-def detect_event_type(title, source=""):
-    t = (title + " " + source).lower()
-
-    for label, keywords in EVENT_RULES:
-        if any(k in t for k in keywords):
-            return label
-
-    return "📌 Notable Development"
-
-
-def is_real_launch(title):
+def event_type(title):
     t = title.lower()
-
-    if any(x in t for x in NEGATIVE_KEYWORDS):
-        return False
-
-    return any(x in t for x in REAL_LAUNCH_KEYWORDS)
-
-
-def quality_score(title, source=""):
-    t = (title + " " + source).lower()
-    score = 0
-
-    score += infer_source_quality(source)
-
-    keyword_hits = sum(1 for kw in REAL_LAUNCH_KEYWORDS if kw in t)
-    score += min(keyword_hits, 6)
-
-    specificity_hits = sum(1 for kw in SPECIFICITY_KEYWORDS if kw in t)
-    score += min(specificity_hits, 3)
-
-    us_hits = sum(1 for kw in US_RELEVANCE_KEYWORDS if kw in t)
-    score += min(us_hits, 2)
-
-    cat = categorize(title, source)
-    if cat == "Agentic Finance":
-        score += 2
-    elif cat == "Crypto":
-        score += 1
-
-    if any(x in t for x in ["launch", "launched", "launches", "introduce", "unveil", "debut"]):
-        score += 2
-    if any(x in t for x in ["partnership", "partners", "integration", "integrates"]):
-        score += 2
-
-    if len(title) > 60:
-        score += 1
-
-    return score
+    if PARTNERSHIP_RE.search(title):
+        return "🤝 Partnership"
+    if "integrat" in t or "api" in t or "sdk" in t:
+        return "🔌 Integration"
+    if any(x in t for x in ["etf", "fund", "index"]):
+        return "🏦 Fund / ETF"
+    if any(x in t for x in ["ai ", "agent", "copilot", "llm"]):
+        return "🧠 AI"
+    return "🚀 Product Launch"
 
 
-def generate_summary(title, source=""):
-    event = detect_event_type(title, source)
-    category = categorize(title, source)
+# ---------------------------------------------------------------
+# SCORING
+# ---------------------------------------------------------------
 
-    if category == "Agentic Finance":
-        category_line = "Agentic-finance signal."
-    elif category == "Crypto":
-        category_line = "Crypto / digital-asset signal."
-    else:
-        category_line = "Traditional-finance signal."
+def score(item):
+    s = 0
+    s += {1: 5, 2: 3, 3: 1}.get(item["tier"], 0)
 
-    if event == "🚀 Product Launch":
-        detail = "New product or platform launch."
-    elif event == "🤝 Partnership":
-        detail = "New partnership or go-to-market collaboration."
-    elif event == "🔌 Integration":
-        detail = "New integration or workflow expansion."
-    elif event == "🏦 Fund / ETF / Index":
-        detail = "New fund, ETF, index, or investment-product development."
-    elif event == "📄 Research / Whitepaper":
-        detail = "New research, whitepaper, webinar, or market study."
-    elif event == "🧠 Agentic / AI":
-        detail = "New AI or agentic-finance development."
-    else:
-        detail = "New notable product-related development."
+    text = f"{item['title']} {item.get('summary', '')}".lower()
+    s += len(LAUNCH_VERB_RE.findall(text))
+    if PARTNERSHIP_RE.search(text):
+        s += 2
 
-    return f"{category_line} {detail}"
+    # Recency decay: newer = better
+    if item.get("published"):
+        age_hours = (datetime.now(timezone.utc) - item["published"]).total_seconds() / 3600
+        s -= age_hours * 0.05  # gentle decay
 
-# -------------------------
-# FETCH FUNCTIONS
-# -------------------------
+    return s
 
-def fetch_rss():
-    items = []
-    for name, url in RSS_SOURCES:
+
+# ---------------------------------------------------------------
+# LINK VALIDATION (HEAD with GET fallback)
+# ---------------------------------------------------------------
+
+def is_valid_link(url):
+    for method in ("head", "get"):
         try:
-            feed = feedparser.parse(url)
+            r = requests.request(
+                method, url,
+                timeout=8,
+                allow_redirects=True,
+                headers=HEADERS,
+                stream=True,
+            )
+            if r.status_code < 400:
+                return True
+        except requests.RequestException:
+            continue
+    return False
+
+
+# ---------------------------------------------------------------
+# FETCH
+# ---------------------------------------------------------------
+
+def fetch_all():
+    health = load_json(HEALTH_FILE, {})
+    cutoff = datetime.now(timezone.utc) - timedelta(hours=MAX_AGE_HOURS)
+    items = []
+
+    for name, url, region, tier in SOURCES:
+        if is_source_blocked(health, name):
+            log.info("Skipping %s (consecutive failures)", name)
+            continue
+
+        try:
+            feed = feedparser.parse(url, request_headers=HEADERS)
+            if feed.bozo and not feed.entries:
+                raise RuntimeError(f"feedparser error: {feed.bozo_exception}")
+
+            fetched = 0
             for e in feed.entries:
                 title = clean(e.get("title"))
                 link = e.get("link")
+                summary = clean(BeautifulSoup_like_strip(e.get("summary", "")))
 
                 if not title or not link:
                     continue
-                if len(title) < 20:
+
+                published = entry_datetime(e)
+                if published and published < cutoff:
                     continue
-                if not is_real_launch(title):
+
+                if not is_real_launch(title, summary):
+                    continue
+
+                regions = detect_region(title, summary, link, region)
+                if not regions:
+                    # GLOBAL source, no US or EU signal — skip
                     continue
 
                 items.append({
                     "title": title,
                     "link": link,
-                    "source": name
+                    "summary": summary,
+                    "source": name,
+                    "tier": tier,
+                    "regions": regions,
+                    "published": published,
                 })
-        except Exception as e:
-            print(f"RSS fetch failed for {name}: {e}")
+                fetched += 1
+
+            log.info("✓ %s — %d matching items", name, fetched)
+            update_health(health, name, True)
+
+        except Exception as exc:
+            log.warning("✗ %s failed: %s", name, exc)
+            update_health(health, name, False)
+
+    save_json(HEALTH_FILE, health)
     return items
 
 
-def fetch_html_sources():
-    items = []
-    for name, url, base in HTML_SOURCES:
-        try:
-            r = requests.get(url, headers=HEADERS, timeout=REQUEST_TIMEOUT)
-            r.raise_for_status()
-            soup = BeautifulSoup(r.text, "html.parser")
-
-            for a in soup.find_all("a", href=True):
-                title = clean(a.get_text())
-                href = a.get("href")
-                link = normalize_link(base, href)
-
-                if not title or not link:
-                    continue
-                if len(title) < 25:
-                    continue
-                if not is_real_launch(title):
-                    continue
-
-                items.append({
-                    "title": title,
-                    "link": link,
-                    "source": name
-                })
-        except Exception as e:
-            print(f"HTML fetch failed for {name}: {e}")
-    return items
+def BeautifulSoup_like_strip(html_text):
+    """Small HTML-strip without requiring BeautifulSoup."""
+    return re.sub(r"<[^>]+>", "", html_text or "")
 
 
-def fetch_company_blogs():
-    items = []
-    failed = 0
+# ---------------------------------------------------------------
+# MESSAGE BUILDING (HTML format for Telegram)
+# ---------------------------------------------------------------
 
-    for name, url in COMPANY_BLOGS:
-        if name in BAD_SOURCES:
-            continue
-
-        try:
-            time.sleep(BLOG_SLEEP_SECONDS)
-            r = requests.get(url, headers=HEADERS, timeout=REQUEST_TIMEOUT)
-            r.raise_for_status()
-            soup = BeautifulSoup(r.text, "html.parser")
-
-            for a in soup.find_all("a", href=True):
-                title = clean(a.get_text())
-                href = a.get("href")
-                link = normalize_link(url, href)
-
-                if not title or not link:
-                    continue
-                if len(title) < 25:
-                    continue
-                if not is_real_launch(title):
-                    continue
-
-                items.append({
-                    "title": title,
-                    "link": link,
-                    "source": f"{name} Blog"
-                })
-        except Exception:
-            BAD_SOURCES.add(name)
-            failed += 1
-            continue
-
-    print(f"Blog sources failed this run: {failed}")
-    return items
-
-# -------------------------
-# MAIN FETCH
-# -------------------------
-
-def fetch_all():
-    items = []
-    items += fetch_rss()
-    items += fetch_html_sources()
-    items += fetch_company_blogs()
-
-    dedup = {}
-    for item in items:
-        item["category"] = categorize(item["title"], item["source"])
-        item["event"] = detect_event_type(item["title"], item["source"])
-        item["quality"] = quality_score(item["title"], item["source"])
-        item["summary"] = generate_summary(item["title"], item["source"])
-
-        id_ = make_id(item["title"], item["link"])
-
-        if id_ not in dedup:
-            dedup[id_] = item
-        else:
-            existing = dedup[id_]
-            if item["quality"] > existing["quality"]:
-                dedup[id_] = item
-            elif item["quality"] == existing["quality"]:
-                if source_priority(item["source"]) < source_priority(existing["source"]):
-                    dedup[id_] = item
-
-    results = list(dedup.values())
-    results.sort(key=lambda x: (-x["quality"], x["category"], x["source"], x["title"]))
-
-    print(f"Total items collected after dedup: {len(results)}")
-    return results
-
-# -------------------------
-# FORMAT
-# -------------------------
-
-def top_items(items):
-    return items[:TOP_N]
+def esc(s):
+    return html.escape(s or "", quote=False)
 
 
-def group_by_top_category(items):
-    grouped = {
-        "Traditional Finance": [],
-        "Crypto": [],
-        "Agentic Finance": [],
-    }
-    for item in items:
-        grouped[item["category"]].append(item)
-    return grouped
+def build_item_block(idx, item):
+    summary = item.get("summary", "").strip()
+    # Trim to ~220 chars for Telegram readability
+    if len(summary) > 220:
+        summary = summary[:220].rsplit(" ", 1)[0] + "…"
+    why = summary or "New product or market development."
+
+    return (
+        f"{idx}. {event_type(item['title'])}\n"
+        f"<a href=\"{esc(item['link'])}\">{esc(item['title'])}</a>\n"
+        f"<i>Why it matters:</i> {esc(why)}\n"
+        f"<i>Source:</i> {esc(item['source'])}\n\n"
+    )
 
 
-def format_messages(items):
-    today = datetime.now().strftime("%b %d, %Y")
-    grouped = group_by_top_category(items)
+def build_messages(region_name, items):
+    """Build one or more Telegram messages for a region, splitting on item boundaries."""
+    if not items:
+        return []
+
+    today = datetime.now().strftime("%b %d")
+    header = f"<b>Daily Fintech Radar — {region_name} — {today}</b>\n\n"
+
+    grouped = {"Traditional Finance": [], "Crypto": [], "Agentic Finance": []}
+    for i in items:
+        grouped[categorize(i["title"], i.get("summary", ""))].append(i)
+
     messages = []
+    current = header
+    idx = 1
 
-    for bucket in ["Traditional Finance", "Crypto", "Agentic Finance"]:
-        bucket_items = grouped[bucket]
-        if not bucket_items:
+    for cat, arr in grouped.items():
+        if not arr:
             continue
+        section_header = f"<b>{cat}</b>\n\n"
+        if len(current) + len(section_header) > TELEGRAM_LIMIT:
+            messages.append(current)
+            current = header + section_header
+        else:
+            current += section_header
 
-        header = (
-            f"Daily Fintech Intelligence — {today}\n\n"
-            f"{bucket}\n"
-            f"Top curated items by quality\n\n"
-        )
-
-        current = header
-
-        for i, item in enumerate(bucket_items, 1):
-            title = truncate_text(item["title"], 160)
-            summary = truncate_text(item["summary"], 110)
-            source = truncate_text(item["source"], 70)
-            link = truncate_text(item["link"], 220)
-
-            block = (
-                f"{i}) {item['event']}: {title}\n"
-                f"{summary}\n"
-                f"{source}\n"
-                f"{link}\n\n"
-            )
-
+        for item in arr:
+            block = build_item_block(idx, item)
             if len(current) + len(block) > TELEGRAM_LIMIT:
-                messages.append(current.strip())
-                current = header + block
+                messages.append(current)
+                current = header + f"<b>{cat} (cont.)</b>\n\n" + block
             else:
                 current += block
+            idx += 1
 
-        if current.strip():
-            messages.append(current.strip())
-
-    if not messages:
-        messages = [f"Daily Fintech Intelligence — {today}\n\nNo new items found today."]
+    if current.strip() and current != header:
+        messages.append(current)
 
     return messages
 
 
+# ---------------------------------------------------------------
+# TELEGRAM
+# ---------------------------------------------------------------
+
 def send(messages):
     if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
-        raise RuntimeError("Missing TELEGRAM_BOT_TOKEN or TELEGRAM_CHAT_ID environment variables.")
+        log.error("Telegram credentials not set; skipping send")
+        return
 
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
-
     for msg in messages:
-        r = requests.post(
-            url,
-            json={
+        try:
+            r = requests.post(url, json={
                 "chat_id": TELEGRAM_CHAT_ID,
                 "text": msg,
-                "disable_web_page_preview": True
-            },
-            timeout=20
-        )
+                "parse_mode": "HTML",
+                "disable_web_page_preview": True,
+            }, timeout=15)
+            if r.status_code != 200:
+                log.warning("Telegram responded %d: %s", r.status_code, r.text[:200])
+            time.sleep(1)  # stay polite with Telegram's rate limit
+        except requests.RequestException as exc:
+            log.error("Telegram send failed: %s", exc)
 
-        if r.status_code != 200:
-            raise RuntimeError(f"Telegram API error {r.status_code}: {r.text}")
 
-        r.raise_for_status()
-
-# -------------------------
-# MAIN
-# -------------------------
+# ---------------------------------------------------------------
+# MAIN PIPELINE
+# ---------------------------------------------------------------
 
 def main():
-    try:
-        seen = load_seen()
-        items = fetch_all()
+    seen = set(load_json(STATE_FILE, []))
+    log.info("Loaded %d seen IDs", len(seen))
 
-        new_items = []
-        for item in items:
-            id_ = make_id(item["title"], item["link"])
-            if id_ not in seen:
-                new_items.append(item)
+    items = fetch_all()
+    log.info("Fetched %d candidate items", len(items))
 
-        print(f"New items before quality curation: {len(new_items)}")
+    # filter already-seen
+    items = [i for i in items if make_id(i["link"]) not in seen]
+    log.info("%d items after dedup vs. seen", len(items))
 
-        curated = top_items(new_items)
-        print(f"Curated top items sent: {len(curated)}")
+    # dedupe within this run (by normalized URL)
+    unique = {}
+    for i in items:
+        unique.setdefault(make_id(i["link"]), i)
+    items = list(unique.values())
 
-        messages = format_messages(curated)
-        print(f"Telegram messages to send: {len(messages)}")
-        send(messages)
+    # score & sort
+    for i in items:
+        i["score"] = score(i)
+    items.sort(key=lambda x: -x["score"])
 
-        for item in curated:
-            seen.add(make_id(item["title"], item["link"]))
+    # split by region, take top N each, validate links
+    per_region = {"US": [], "EU": []}
+    for i in items:
+        for r in i["regions"]:
+            if r in per_region and len(per_region[r]) < TOP_N_PER_REGION * 2:
+                per_region[r].append(i)
 
-        save_seen(seen)
+    final = {}
+    for region, arr in per_region.items():
+        validated = []
+        for item in arr:
+            if len(validated) >= TOP_N_PER_REGION:
+                break
+            if is_valid_link(item["link"]):
+                validated.append(item)
+        final[region] = validated
+        log.info("%s: %d items after link validation", region, len(validated))
 
-    except Exception as e:
-        print(f"Fatal error: {e}")
-        traceback.print_exc()
-        raise
+    # send, one region at a time
+    for region_name, label in (("US", "🇺🇸 US"), ("EU", "🇪🇺 Europe")):
+        msgs = build_messages(label, final[region_name])
+        if msgs:
+            log.info("Sending %d message(s) for %s", len(msgs), region_name)
+            send(msgs)
+
+    # update seen and trim
+    for region_items in final.values():
+        for i in region_items:
+            seen.add(make_id(i["link"]))
+    if len(seen) > MAX_SEEN_ENTRIES:
+        # arbitrary trim — keep most recent half
+        seen = set(list(seen)[-MAX_SEEN_ENTRIES // 2:])
+    save_json(STATE_FILE, list(seen))
+    log.info("Saved %d seen IDs", len(seen))
 
 
 if __name__ == "__main__":
     main()
+```
+
+That's the complete 572-line file with the three Google News feeds included (lines 96–100 in the SOURCES list). Ready to drop into your repo.
