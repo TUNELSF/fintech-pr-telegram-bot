@@ -33,8 +33,8 @@ TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 STATE_FILE = "seen_ids.json"
 HEALTH_FILE = "source_health.json"
 
-TOP_N_PER_REGION = 20
-MAX_AGE_HOURS = 48
+TOP_N_PER_REGION = 30
+MAX_AGE_HOURS = 72
 TELEGRAM_LIMIT = 4000  # actual limit is 4096, leaving headroom
 MAX_SEEN_ENTRIES = 5000  # cap to keep state file bounded
 
@@ -98,11 +98,22 @@ SOURCES = [
     ("Google News (wires)",  "https://news.google.com/rss/search?q=%22launches%22+(fintech+OR+%22digital+bank%22+OR+payments+OR+stablecoin)+(site%3Aprnewswire.com+OR+site%3Abusinesswire.com+OR+site%3Aglobenewswire.com)&hl=en-US&gl=US&ceid=US:en", "GLOBAL", 2),
     ("Google News (US)",     "https://news.google.com/rss/search?q=(%22launches%22+OR+%22unveils%22+OR+%22introduces%22)+(fintech+OR+bank+OR+wallet+OR+payments+OR+stablecoin)+%22U.S.%22&hl=en-US&gl=US&ceid=US:en", "GLOBAL", 2),
     ("Google News (Europe)", "https://news.google.com/rss/search?q=(%22launches%22+OR+%22unveils%22+OR+%22introduces%22)+(fintech+OR+bank+OR+wallet+OR+payments)+(UK+OR+Europe+OR+European)&hl=en-GB&gl=GB&ceid=GB:en", "GLOBAL", 2),
+    ("Google News (ETFs)",   "https://news.google.com/rss/search?q=(%22spot+ETF%22+OR+%22files+for+ETF%22+OR+%22launches+ETF%22+OR+%22ETF+approval%22+OR+%22new+ETF%22+OR+%22ETF+filing%22)&hl=en-US&gl=US&ceid=US:en", "GLOBAL", 1),
+    ("Google News (crypto)", "https://news.google.com/rss/search?q=(%22launches%22+OR+%22debuts%22+OR+%22unveils%22+OR+%22rolls+out%22+OR+%22goes+live%22)+(stablecoin+OR+%22token+launch%22+OR+mainnet+OR+%22layer+2%22+OR+%22crypto+platform%22+OR+tokenization+OR+%22onchain%22)&hl=en-US&gl=US&ceid=US:en", "GLOBAL", 2),
+    ("Google News (AI fin)", "https://news.google.com/rss/search?q=(%22AI+agent%22+OR+agentic+OR+copilot+OR+%22LLM%22+OR+%22generative+AI%22)+(finance+OR+bank+OR+fintech+OR+payments+OR+trading)+(%22launches%22+OR+%22debuts%22+OR+%22unveils%22+OR+%22introduces%22)&hl=en-US&gl=US&ceid=US:en", "GLOBAL", 2),
+    ("Google News (funds)",  "https://news.google.com/rss/search?q=(%22launches+fund%22+OR+%22closes+fund%22+OR+%22first+close%22+OR+%22final+close%22+OR+%22new+fund%22)+(venture+OR+fintech+OR+crypto+OR+digital+OR+growth)&hl=en-US&gl=US&ceid=US:en", "GLOBAL", 2),
 
     # Tech / crypto — tier 3, filtered strictly
     ("TechCrunch Fintech","https://techcrunch.com/category/fintech/feed/", "GLOBAL", 3),
     ("The Block",         "https://www.theblock.co/rss.xml", "GLOBAL", 3),
     ("CoinDesk",          "https://www.coindesk.com/arc/outboundfeeds/rss/", "GLOBAL", 3),
+    ("Decrypt",           "https://decrypt.co/feed", "GLOBAL", 3),  # VERIFY
+    ("Cointelegraph",     "https://cointelegraph.com/rss", "GLOBAL", 3),
+    ("Blockworks",        "https://blockworks.co/feed", "GLOBAL", 3),  # VERIFY
+    ("Ledger Insights",   "https://www.ledgerinsights.com/feed/", "GLOBAL", 3),
+    ("Payments Dive",     "https://www.paymentsdive.com/feeds/news/", "US", 3),
+    ("Crowdfund Insider", "https://www.crowdfundinsider.com/feed/", "GLOBAL", 3),
+    ("ETF.com",           "https://www.etf.com/rss.xml", "US", 2),  # VERIFY
 ]
 
 
@@ -112,15 +123,34 @@ SOURCES = [
 
 LAUNCH_VERB_RE = re.compile(
     r"\b(launch(?:es|ed|ing)?|introduc(?:es|ed|ing)|unveil(?:s|ed|ing)?|"
-    r"debut(?:s|ed|ing)?|roll(?:s|ed)?\s+out|go(?:es)?\s+live|"
-    r"releas(?:es|ed|ing))\b",
+    r"debut(?:s|ed|ing)?|roll(?:s|ed|ing)?\s+out|go(?:es|ing)?\s+live|"
+    r"releas(?:es|ed|ing)|announc(?:es|ed|ing)|"
+    r"file(?:s|d)?\s+for|"
+    r"expand(?:s|ed|ing)?\s+(?:into|to|with)|"
+    r"add(?:s|ed|ing)?\s+(?:new|support|crypto|stablecoin)|"
+    r"begin(?:s|ning)?\s+(?:offering|accepting|trading|supporting)|"
+    r"pilot(?:s|ed|ing)?|"
+    r"open(?:s|ed|ing)?\s+(?:up|to|for|access)|"
+    r"bring(?:s|ing)?\s+(?:to|new)|"
+    r"enabl(?:es|ed|ing)|activat(?:es|ed|ing)|"
+    r"approv(?:es|ed|ing)|list(?:s|ed|ing)\s+on|"
+    r"offer(?:s|ing|ed)\s+new)\b",
     re.I,
 )
 
 PRODUCT_NOUN_RE = re.compile(
     r"\b(platform|product|service|app|feature|tool|api|sdk|integration|"
-    r"partnership|fund|etf|index|stablecoin|card|account|loan|wallet|"
-    r"stack|suite|neobank|bank|exchange|marketplace|portal|solution)\b",
+    r"partnership|fund|etf|index|stablecoin|coin|token|"
+    r"card|account|loan|wallet|stack|suite|neobank|bank|exchange|"
+    r"marketplace|portal|solution|network|protocol|blockchain|chain|"
+    r"payment|payments|lending|credit|mortgage|insurance|annuity|"
+    r"trading|custody|staking|rewards|savings|checking|yield|deposit|"
+    r"treasury|transfer|remittance|rail|brokerage|advisor|"
+    r"robo-?advisor|launchpad|pool|vault|strategy|"
+    r"chatbot|agent|copilot|assistant|model|"
+    r"ira|401k|retirement|pension|"
+    r"subscription|tier|program|initiative|offering|"
+    r"mainnet|testnet|rollup|sidechain)\b",
     re.I,
 )
 
@@ -131,14 +161,31 @@ PARTNERSHIP_RE = re.compile(
     re.I,
 )
 
+# High-signal patterns that bypass the verb+noun requirement.
+# ETFs, fund closes, and funding rounds use distinctive phrasing that
+# the main regex misses (e.g. "files S-1 for spot ETF", "closes $50M fund").
+ETF_FUND_RE = re.compile(
+    r"\b(spot\s+(?:bitcoin|ethereum|solana|crypto|btc|eth|sol|xrp)\s+etf|"
+    r"etf\s+(?:launch|approval|filing|listing|debut)|"
+    r"(?:new|first|launches?|approves?)\s+(?:spot\s+)?etf|"
+    r"files?\s+(?:for\s+)?(?:spot\s+)?etf|"
+    r"(?:launches?|closes?)\s+\$?\d+\s*[mb]?\s*(?:fund|round|vehicle)|"
+    r"raises?\s+\$?\d+\s*[mb]?\s*(?:series|seed|round)|"
+    r"first\s+close|final\s+close)\b",
+    re.I,
+)
+
 NEGATIVE_RE = re.compile(
-    r"\b(earnings|quarterly|fiscal\s+(?:year|quarter)|q[1-4]\s+\d|"
-    r"price\s+(?:prediction|target|analysis)|opinion|podcast|interview|"
-    r"lawsuit|sues|sued|settlement|fined|penalty|violation|"
-    r"hack(?:ed|ing)?|breach(?:ed)?|exploit|stolen|scam|fraud|"
-    r"layoff|resigns?|fires?\s+|cut\s+jobs|"
-    r"market\s+(?:wrap|report|recap)|weekly\s+recap|daily\s+brief|"
-    r"upgrade\s+(?:to|from)|downgrade|rating\s+(?:cut|lowered))\b",
+    r"\b(earnings\s+(?:call|report|beat|miss|preview)|"
+    r"quarterly\s+(?:report|results)|"
+    r"price\s+(?:prediction|target|analysis|forecast)|"
+    r"opinion\s+piece|editorial|"
+    r"podcast\s+episode|weekly\s+interview|"
+    r"lawsuit|sues|sued|settlement|fined|penalty|"
+    r"hack(?:ed|ing)?|breach(?:ed)?|exploit(?:ed|s)?|stolen|scam|fraud\s+alert|"
+    r"layoff|cut\s+jobs|mass\s+firing|"
+    r"market\s+(?:wrap|recap)|weekly\s+recap|daily\s+brief|morning\s+brief|"
+    r"downgrade|rating\s+(?:cut|lowered|downgrade))\b",
     re.I,
 )
 
@@ -243,15 +290,19 @@ def is_source_blocked(health, source):
 
 def is_real_launch(title, summary=""):
     """
-    Stricter filter: must match one of:
-      - launch verb + product noun
+    Filter: must match one of:
+      - ETF / fund / funding round pattern (high-signal bypass)
       - partnership / integration pattern
+      - launch verb + product noun
     AND must not match a negative pattern.
     """
     text = f"{title} {summary}"
 
     if NEGATIVE_RE.search(text):
         return False
+
+    if ETF_FUND_RE.search(text):
+        return True
 
     if PARTNERSHIP_RE.search(text):
         return True
@@ -264,9 +315,10 @@ def is_real_launch(title, summary=""):
 
 def detect_region(title, summary, link, source_region):
     """
-    Returns a set of regions the item belongs to: {"US"}, {"EU"}, or both.
-    For explicit-region sources, trust the tag.
-    For GLOBAL sources, scan text for signals.
+    Returns a set of regions the item belongs to.
+    Explicit-region sources (US/EU): trust the source tag.
+    GLOBAL sources: scan text for signals; if none match,
+    fall through to a "GLOBAL" bucket so the item isn't dropped.
     """
     if source_region in ("US", "EU"):
         return {source_region}
@@ -277,6 +329,8 @@ def detect_region(title, summary, link, source_region):
         regions.add("US")
     if EU_SIGNALS.search(text):
         regions.add("EU")
+    if not regions:
+        regions.add("GLOBAL")
     return regions
 
 
@@ -532,7 +586,7 @@ def main():
     items.sort(key=lambda x: -x["score"])
 
     # split by region, take top N each, validate links
-    per_region = {"US": [], "EU": []}
+    per_region = {"US": [], "EU": [], "GLOBAL": []}
     for i in items:
         for r in i["regions"]:
             if r in per_region and len(per_region[r]) < TOP_N_PER_REGION * 2:
@@ -544,13 +598,19 @@ def main():
         for item in arr:
             if len(validated) >= TOP_N_PER_REGION:
                 break
-            if is_valid_link(item["link"]):
+            # Tier 1 sources (regulators / wires) rarely serve broken links —
+            # skip validation to save time and avoid false negatives.
+            if item["tier"] == 1 or is_valid_link(item["link"]):
                 validated.append(item)
         final[region] = validated
         log.info("%s: %d items after link validation", region, len(validated))
 
     # send, one region at a time
-    for region_name, label in (("US", "🇺🇸 US"), ("EU", "🇪🇺 Europe")):
+    for region_name, label in (
+        ("US", "🇺🇸 US"),
+        ("EU", "🇪🇺 Europe"),
+        ("GLOBAL", "🌍 Global / Other"),
+    ):
         msgs = build_messages(label, final[region_name])
         if msgs:
             log.info("Sending %d message(s) for %s", len(msgs), region_name)
