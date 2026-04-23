@@ -24,6 +24,8 @@ TELEGRAM_LIMIT = 3000
 REQUEST_TIMEOUT = 10
 BLOG_SLEEP_SECONDS = 0.2
 
+BAD_SOURCES = set()
+
 # -------------------------
 # RSS SOURCES
 # -------------------------
@@ -219,49 +221,26 @@ SOURCE_QUALITY = {
     "ibs intelligence": 3,
 }
 
-EVENT_RULES = [
-    ("🧠 Agentic / AI", [
-        "agentic", "ai agent", "ai agents", "copilot", "assistant",
-        "autonomous", "agent-based", "ai advisor", "ai treasury",
-        "ai invoice", "ai underwriting"
-    ]),
-    ("🚀 Product Launch", [
-        "launch", "launches", "launched", "introduce", "introduces",
-        "introduced", "unveil", "unveils", "unveiled", "debut", "debuts"
-    ]),
-    ("🤝 Partnership", [
-        "partnership", "partners", "partner", "collaboration", "alliance"
-    ]),
-    ("🔌 Integration", [
-        "integration", "integrates", "integrated", "embedded", "api"
-    ]),
-    ("🏦 Fund / ETF / Index", [
-        "etf", "fund", "index", "benchmark", "portfolio", "strategy"
-    ]),
-    ("📄 Research / Whitepaper", [
-        "whitepaper", "research", "report", "webinar", "study"
-    ]),
-]
-
-STRONG_POSITIVE_KEYWORDS = [
+REAL_LAUNCH_KEYWORDS = [
     "launch", "launches", "launched",
     "introduce", "introduces", "introduced",
-    "announce", "announces", "announced",
     "unveil", "unveils", "unveiled",
     "debut", "debuts", "debuted",
     "partnership", "partners", "partner",
     "integration", "integrates", "integrated",
     "rollout", "roll out",
     "new product", "new platform", "new solution",
-    "whitepaper", "research", "webinar",
+    "whitepaper", "research", "report", "webinar",
     "api", "platform", "solution", "index", "etf", "fund",
-    "tokenization", "stablecoin", "custody", "wallet"
+    "stablecoin", "tokenization", "custody", "wallet",
+    "launches in the u.s.", "u.s. launch", "available in the u.s."
 ]
 
-WEAK_NEGATIVE_KEYWORDS = [
+NEGATIVE_KEYWORDS = [
     "price prediction", "market wrap", "price analysis", "trading setup",
     "op-ed", "opinion", "podcast", "transcript", "lawsuit",
-    "investigation", "enforcement", "macro outlook"
+    "investigation", "enforcement", "macro outlook", "earnings call",
+    "conference call", "stock price", "market closes", "technical analysis"
 ]
 
 US_RELEVANCE_KEYWORDS = [
@@ -285,6 +264,30 @@ CRYPTO_KEYWORDS = [
     "exchange", "spot bitcoin", "spot ether", "solana", "arbitrum",
     "base", "optimism", "zksync", "starknet", "polygon",
     "aptos", "sui", "avalanche", "bnb", "tron", "ton"
+]
+
+EVENT_RULES = [
+    ("🧠 Agentic / AI", [
+        "agentic", "ai agent", "ai agents", "copilot", "assistant",
+        "autonomous", "agent-based", "ai advisor", "ai treasury",
+        "ai invoice", "ai underwriting"
+    ]),
+    ("🚀 Product Launch", [
+        "launch", "launches", "launched", "introduce", "introduces",
+        "introduced", "unveil", "unveils", "unveiled", "debut", "debuts"
+    ]),
+    ("🤝 Partnership", [
+        "partnership", "partners", "partner", "collaboration", "alliance"
+    ]),
+    ("🔌 Integration", [
+        "integration", "integrates", "integrated", "embedded", "api"
+    ]),
+    ("🏦 Fund / ETF / Index", [
+        "etf", "fund", "index", "benchmark", "portfolio", "strategy"
+    ]),
+    ("📄 Research / Whitepaper", [
+        "whitepaper", "research", "report", "webinar", "study"
+    ]),
 ]
 
 SPECIFICITY_KEYWORDS = [
@@ -380,58 +383,41 @@ def detect_event_type(title, source=""):
     return "📌 Notable Development"
 
 
-def is_productish(title):
+def is_real_launch(title):
     t = title.lower()
 
-    if any(x in t for x in WEAK_NEGATIVE_KEYWORDS):
+    if any(x in t for x in NEGATIVE_KEYWORDS):
         return False
 
-    broad_positive = STRONG_POSITIVE_KEYWORDS + [
-        "new", "product", "feature", "features", "capability", "capabilities",
-        "report", "paper", "index", "fund", "etf", "tooling", "tool",
-        "launchpad", "infrastructure", "payments", "banking", "custody"
-    ]
-
-    return any(x in t for x in broad_positive)
+    return any(x in t for x in REAL_LAUNCH_KEYWORDS)
 
 
 def quality_score(title, source=""):
     t = (title + " " + source).lower()
     score = 0
 
-    # Source quality (0-5)
     score += infer_source_quality(source)
 
-    # Product / launch intent (0-6)
-    intent_hits = sum(1 for kw in STRONG_POSITIVE_KEYWORDS if kw in t)
-    score += min(intent_hits, 6)
+    keyword_hits = sum(1 for kw in REAL_LAUNCH_KEYWORDS if kw in t)
+    score += min(keyword_hits, 6)
 
-    # Specificity (0-3)
     specificity_hits = sum(1 for kw in SPECIFICITY_KEYWORDS if kw in t)
     score += min(specificity_hits, 3)
 
-    # U.S. relevance (0-2)
     us_hits = sum(1 for kw in US_RELEVANCE_KEYWORDS if kw in t)
     score += min(us_hits, 2)
 
-    # Category bonus
     cat = categorize(title, source)
     if cat == "Agentic Finance":
         score += 2
     elif cat == "Crypto":
         score += 1
 
-    # Strong bonus for explicit launch/partnership/integration
     if any(x in t for x in ["launch", "launched", "launches", "introduce", "unveil", "debut"]):
         score += 2
     if any(x in t for x in ["partnership", "partners", "integration", "integrates"]):
         score += 2
 
-    # Penalty for weak/noisy items
-    if any(x in t for x in WEAK_NEGATIVE_KEYWORDS):
-        score -= 3
-
-    # Slight reward for richer titles
     if len(title) > 60:
         score += 1
 
@@ -462,7 +448,7 @@ def generate_summary(title, source=""):
     elif event == "🧠 Agentic / AI":
         detail = "New AI or agentic-finance development."
     else:
-        detail = "New notable sector development."
+        detail = "New notable product-related development."
 
     return f"{category_line} {detail}"
 
@@ -483,7 +469,7 @@ def fetch_rss():
                     continue
                 if len(title) < 20:
                     continue
-                if not is_productish(title):
+                if not is_real_launch(title):
                     continue
 
                 items.append({
@@ -513,7 +499,7 @@ def fetch_html_sources():
                     continue
                 if len(title) < 25:
                     continue
-                if not is_productish(title):
+                if not is_real_launch(title):
                     continue
 
                 items.append({
@@ -531,6 +517,9 @@ def fetch_company_blogs():
     failed = 0
 
     for name, url in COMPANY_BLOGS:
+        if name in BAD_SOURCES:
+            continue
+
         try:
             time.sleep(BLOG_SLEEP_SECONDS)
             r = requests.get(url, headers=HEADERS, timeout=REQUEST_TIMEOUT)
@@ -546,7 +535,7 @@ def fetch_company_blogs():
                     continue
                 if len(title) < 25:
                     continue
-                if not is_productish(title):
+                if not is_real_launch(title):
                     continue
 
                 items.append({
@@ -555,10 +544,11 @@ def fetch_company_blogs():
                     "source": f"{name} Blog"
                 })
         except Exception:
+            BAD_SOURCES.add(name)
             failed += 1
             continue
 
-    print(f"Blog sources failed: {failed}")
+    print(f"Blog sources failed this run: {failed}")
     return items
 
 # -------------------------
@@ -636,17 +626,15 @@ def format_messages(items):
         for i, item in enumerate(bucket_items, 1):
             title = truncate_text(item["title"], 160)
             summary = truncate_text(item["summary"], 110)
+            source = truncate_text(item["source"], 70)
             link = truncate_text(item["link"], 220)
 
             block = (
-                f"{i}) {item['event']} {title}\n"
+                f"{i}) {item['event']}: {title}\n"
                 f"{summary}\n"
-                f"{item['source']}\n"
+                f"{source}\n"
                 f"{link}\n\n"
             )
-
-            if len(block) > 1200:
-                block = truncate_text(block, 1200) + "\n\n"
 
             if len(current) + len(block) > TELEGRAM_LIMIT:
                 messages.append(current.strip())
